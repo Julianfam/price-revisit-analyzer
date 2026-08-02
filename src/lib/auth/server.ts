@@ -2,18 +2,15 @@
  * Self-hosted Better Auth for THIS app (server-only).
  *
  * Preview (no DATABASE_URL): uses Better Auth **memory adapter** on globalThis.
- *   → Login never depends on PGLite (avoids ENOENT / database_warming loops on mobile).
- *   → Sessions survive Vite HMR within the same process (globalThis).
- * Deployed (DATABASE_URL): real Postgres pool.
- *
- * App data (alerts, etc.) still uses PGLite via `@/lib/db` separately.
+ * Deployed (DATABASE_URL): real Postgres pool — required on Vercel for OAuth/session
+ * to survive across serverless isolates.
  */
 import { betterAuth } from "better-auth";
 import { bearer, genericOAuth } from "better-auth/plugins";
 import { tanstackStartCookies } from "better-auth/tanstack-start";
 import { memoryAdapter, type MemoryDB } from "better-auth/adapters/memory";
 import { getCookie } from "@tanstack/react-start/server";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { Pool } from "pg";
 import { emailAndPasswordEnabled } from "./email-password";
 import { GROK_PROVIDERS } from "./providers";
@@ -26,13 +23,36 @@ import {
 
 const globalAuthRef = globalThis as typeof globalThis & {
   __grokAuthPreviewSecret__?: string;
-  /** Shared memory DB — survives HMR so OAuth mid-flow is not wiped. */
   __grokAuthMemoryDB__?: MemoryDB;
+};
+
+const env = (key: string): string | undefined => {
+  const value = process.env[key]?.trim();
+  return value ? value : undefined;
 };
 
 function previewAuthSecret(): string {
   globalAuthRef.__grokAuthPreviewSecret__ ??= randomBytes(32).toString("hex");
   return globalAuthRef.__grokAuthPreviewSecret__;
+}
+
+/**
+ * Stable secret for serverless when BETTER_AUTH_SECRET is missing.
+ * Random per-instance secrets break OAuth (can't verify state / cookies).
+ */
+function resolveAuthSecret(): string {
+  const explicit = env("BETTER_AUTH_SECRET");
+  if (explicit) return explicit;
+  const seed =
+    env("VERCEL_PROJECT_ID") ||
+    env("VERCEL_PROJECT_PRODUCTION_URL") ||
+    env("VERCEL_URL");
+  if (seed) {
+    return createHash("sha256")
+      .update(`pra-auth-secret-v1:${seed}`)
+      .digest("hex");
+  }
+  return previewAuthSecret();
 }
 
 function previewMemoryDB(): MemoryDB {
@@ -52,11 +72,6 @@ function previewMemoryDB(): MemoryDB {
   return globalAuthRef.__grokAuthMemoryDB__;
 }
 
-const env = (key: string): string | undefined => {
-  const value = process.env[key]?.trim();
-  return value ? value : undefined;
-};
-
 const authDisabled = env("VITE_AUTH_ENABLED") === "false";
 
 const grokIssuer = env("GROK_AUTH_ISSUER") ?? GROK_ISSUER_DEFAULT;
@@ -66,49 +81,110 @@ const grokClientSecret = env("GROK_AUTH_CLIENT_SECRET") ?? PREVIEW_CLIENT_SECRET
 export const authConfigured =
   !authDisabled && Boolean(grokClientId && grokClientSecret);
 
-const explicitBaseURL = env("BETTER_AUTH_URL");
+/** Native X / Google OAuth (recommended for Vercel production). */
+export const hasNativeTwitter = Boolean(
+  env("TWITTER_CLIENT_ID") && env("TWITTER_CLIENT_SECRET"),
+);
+export const hasNativeGoogle = Boolean(
+  env("GOOGLE_CLIENT_ID") && env("GOOGLE_CLIENT_SECRET"),
+);
+
+function httpsUrl(hostOrUrl: string): string {
+  if (hostOrUrl.startsWith("http://") || hostOrUrl.startsWith("https://")) {
+    return hostOrUrl.replace(/\/+$/, "");
+  }
+  return `https://${hostOrUrl.replace(/\/+$/, "")}`;
+}
+
+function vercelPublicUrl(): string | undefined {
+  const prod = env("VERCEL_PROJECT_PRODUCTION_URL");
+  if (prod) return httpsUrl(prod);
+  const url = env("VERCEL_URL");
+  if (url) return httpsUrl(url);
+  return undefined;
+}
+
+const explicitBaseURL = env("BETTER_AUTH_URL") ?? vercelPublicUrl();
 const previewAllowedHosts: string[] = [...PREVIEW_ALLOWED_HOSTS];
 const LOCAL_DEV_ORIGINS: string[] = [
   "http://localhost:8080",
   "http://127.0.0.1:8080",
   "http://[::1]:8080",
 ];
+
 const baseURL = explicitBaseURL ?? {
-  allowedHosts: [...previewAllowedHosts, "localhost", "127.0.0.1", "[::1]"],
+  allowedHosts: [
+    ...previewAllowedHosts,
+    "localhost",
+    "127.0.0.1",
+    "[::1]",
+    "*.vercel.app",
+  ],
   protocol: "auto" as const,
   fallback: "http://localhost:8080",
 };
 
-const trustedOrigins: string[] = explicitBaseURL
-  ? [explicitBaseURL, ...LOCAL_DEV_ORIGINS]
-  : [
-      ...previewAllowedHosts,
-      ...previewAllowedHosts.flatMap((host) => [
-        `https://${host}`,
-        `http://${host}`,
-      ]),
-      ...LOCAL_DEV_ORIGINS,
-    ];
+const STATIC_TRUSTED: string[] = [
+  ...LOCAL_DEV_ORIGINS,
+  "https://*.vercel.app",
+  "https://*.grok-sandbox.com",
+  "https://*.grok.me",
+];
+if (explicitBaseURL) STATIC_TRUSTED.push(explicitBaseURL);
+for (const key of [
+  "VERCEL_URL",
+  "VERCEL_BRANCH_URL",
+  "VERCEL_PROJECT_PRODUCTION_URL",
+] as const) {
+  const v = env(key);
+  if (v) STATIC_TRUSTED.push(httpsUrl(v));
+}
+for (const host of previewAllowedHosts) {
+  STATIC_TRUSTED.push(`https://${host}`);
+  STATIC_TRUSTED.push(`http://${host}`);
+}
+
+/**
+ * Dynamic trusted origins: always allow the request Host (fixes
+ * "Invalid origin: https://….vercel.app" on production).
+ */
+async function trustedOrigins(request?: Request): Promise<string[]> {
+  const out = new Set(STATIC_TRUSTED);
+  if (request) {
+    const xfHost =
+      request.headers.get("x-forwarded-host")?.split(",")[0]?.trim() ||
+      request.headers.get("host")?.split(",")[0]?.trim();
+    if (xfHost) {
+      const hostOnly = xfHost.split(":")[0] ?? xfHost;
+      const isLocal =
+        hostOnly === "localhost" ||
+        hostOnly === "127.0.0.1" ||
+        hostOnly === "[::1]";
+      out.add(`${isLocal ? "http" : "https"}://${xfHost}`);
+      out.add(`https://${hostOnly}`);
+    }
+    try {
+      out.add(new URL(request.url).origin);
+    } catch {
+      /* ignore */
+    }
+  }
+  return [...out];
+}
 
 const databaseUrl = env("DATABASE_URL");
+export const authUsesDurableDb = Boolean(databaseUrl);
 
 const issuerBase = grokIssuer.replace(/\/+$/, "");
 const grokAuthorizationUrl = `${issuerBase}/api/auth/oauth2/authorize`;
 const grokTokenUrl = `${issuerBase}/api/auth/oauth2/token`;
 const grokUserInfoUrl = `${issuerBase}/api/auth/oauth2/userinfo`;
 
-/**
- * Deployed → Postgres.
- * Preview → in-memory adapter (NO PGLite). This is the fix for mobile login
- * loops on database_warming / pglite ENOENT.
- */
 const database = databaseUrl
-  ? new Pool({ connectionString: databaseUrl })
+  ? new Pool({ connectionString: databaseUrl, max: 3 })
   : memoryAdapter(previewMemoryDB());
 
 export const SESSION_TOKEN_COOKIE = "__Secure-grok-auth.session_token";
-// Also used on some hosts:
-// "__Host-grok-auth.session_token" | "grok-auth.session_token"
 
 const grokOAuthPlugin = authConfigured
   ? genericOAuth({
@@ -125,25 +201,49 @@ const grokOAuthPlugin = authConfigured
     })
   : null;
 
+const socialProviders: Record<
+  string,
+  { clientId: string; clientSecret: string }
+> = {};
+if (hasNativeTwitter) {
+  socialProviders.twitter = {
+    clientId: env("TWITTER_CLIENT_ID") as string,
+    clientSecret: env("TWITTER_CLIENT_SECRET") as string,
+  };
+}
+if (hasNativeGoogle) {
+  socialProviders.google = {
+    clientId: env("GOOGLE_CLIENT_ID") as string,
+    clientSecret: env("GOOGLE_CLIENT_SECRET") as string,
+  };
+}
+
 export const auth = betterAuth({
   baseURL,
-  secret: env("BETTER_AUTH_SECRET") ?? previewAuthSecret(),
+  secret: resolveAuthSecret(),
   database,
   trustedOrigins,
-
+  rateLimit: {
+    enabled: true,
+    window: 60,
+    max: 200,
+  },
   account: {
     encryptOAuthTokens: true,
     accountLinking: {
       enabled: true,
-      trustedProviders: GROK_PROVIDERS.map((p) => p.providerId),
+      trustedProviders: [
+        ...GROK_PROVIDERS.map((p) => p.providerId),
+        ...(hasNativeTwitter ? ["twitter"] : []),
+        ...(hasNativeGoogle ? ["google"] : []),
+      ],
       requireLocalEmailVerified: false,
     },
   },
-
   emailAndPassword: {
     enabled: emailAndPasswordEnabled,
   },
-
+  ...(Object.keys(socialProviders).length > 0 ? { socialProviders } : {}),
   session: {
     expiresIn: 60 * 60 * 24 * 30,
     updateAge: 60 * 60 * 24,
@@ -152,13 +252,10 @@ export const auth = betterAuth({
       maxAge: 60 * 5,
     },
   },
-
   advanced: {
     useSecureCookies: true,
-    // __Host- prefix in production/preview https; cookie name for popup reader
     cookiePrefix: "grok-auth",
   },
-
   plugins: [
     bearer(),
     ...(grokOAuthPlugin ? [grokOAuthPlugin] : []),
@@ -168,7 +265,6 @@ export const auth = betterAuth({
 
 export type Session = typeof auth.$Infer.Session;
 
-/** Read session token from request cookies (popup / oauth done bridges). */
 export function sessionTokenFromCookies(request: Request): string | null {
   const header = request.headers.get("cookie");
   if (!header) return null;
@@ -194,7 +290,6 @@ export function sessionTokenFromCookies(request: Request): string | null {
       }
     }
   }
-  // Fallback: tanstack cookie helper when available in handler context
   try {
     for (const name of names) {
       const v = getCookie(name);

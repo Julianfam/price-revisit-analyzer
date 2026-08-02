@@ -1,9 +1,15 @@
 /**
- * Mobile-safe OAuth start — real TanStack API route (no SPA Not Found).
- * Auth uses in-memory adapter in preview → no PGLite / database_warming.
+ * OAuth start — real TanStack API route (no SPA Not Found).
+ * Production (Vercel): prefers native X/Google when env is set; falls back to
+ * Grok broker. Always uses relative callback paths so trustedOrigins wildcards
+ * accept them.
  */
 import { createFileRoute } from "@tanstack/react-router";
-import { auth } from "@/lib/auth/server";
+import {
+  auth,
+  hasNativeGoogle,
+  hasNativeTwitter,
+} from "@/lib/auth/server";
 import { PREVIEW_ALLOWED_HOSTS } from "@/lib/auth/preview";
 
 function hostAllowed(hostname: string): boolean {
@@ -16,6 +22,8 @@ function hostAllowed(hostname: string): boolean {
   ) {
     return true;
   }
+  // Vercel production / preview deployments
+  if (h.endsWith(".vercel.app") || h === "vercel.app") return true;
   for (const pattern of PREVIEW_ALLOWED_HOSTS) {
     if (pattern.startsWith("*.")) {
       const suffix = pattern.slice(1);
@@ -106,6 +114,27 @@ function safeReturnTo(raw: string | null): string {
   return "/";
 }
 
+/**
+ * Map UI provider ids to the actual Better Auth provider:
+ * - Native Twitter/Google when env is set (Vercel production)
+ * - Grok broker ids otherwise (live preview)
+ */
+function resolveProvider(providerId: string): {
+  id: string;
+  kind: "social" | "oauth2";
+} {
+  const p = providerId.trim();
+  if (p === "grok-x" || p === "twitter" || p === "x") {
+    if (hasNativeTwitter) return { id: "twitter", kind: "social" };
+    return { id: "grok-x", kind: "oauth2" };
+  }
+  if (p === "grok-google" || p === "google") {
+    if (hasNativeGoogle) return { id: "google", kind: "social" };
+    return { id: "grok-google", kind: "oauth2" };
+  }
+  return { id: p, kind: "oauth2" };
+}
+
 async function handleStart(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const providerId = url.searchParams.get("providerId")?.trim();
@@ -118,8 +147,9 @@ async function handleStart(request: Request): Promise<Response> {
 
   const done = new URL(`${appOrigin}/api/oauth/done`);
   if (returnTo !== "/") done.searchParams.set("returnTo", returnTo);
-  const callbackURL = done.toString();
-  const errorURL = `${appOrigin}/api/oauth/done?error=1`;
+  // Relative paths are always trusted by Better Auth (allowRelativePaths)
+  const callbackURL = returnTo.startsWith("/") ? returnTo : "/";
+  const errorCallbackURL = `/login?auth_error=oauth`;
 
   const authHeaders = new Headers(request.headers);
   try {
@@ -132,28 +162,57 @@ async function handleStart(request: Request): Promise<Response> {
     /* keep */
   }
 
+  const resolved = resolveProvider(providerId);
+
   try {
-    const apiRes = await auth.api.signInWithOAuth2({
-      body: {
-        providerId,
-        callbackURL,
-        errorCallbackURL: errorURL,
-      },
-      headers: authHeaders,
-      asResponse: true,
-    });
+    let apiRes: Response;
+
+    if (resolved.kind === "social") {
+      // Built-in Twitter / Google
+      apiRes = await auth.api.signInSocial({
+        body: {
+          provider: resolved.id as "twitter" | "google",
+          callbackURL,
+          errorCallbackURL,
+        },
+        headers: authHeaders,
+        asResponse: true,
+      });
+    } else {
+      // Grok broker (preview) or generic OAuth2
+      apiRes = await auth.api.signInWithOAuth2({
+        body: {
+          providerId: resolved.id,
+          // Absolute done URL so mobile handoff lands on /api/oauth/done
+          callbackURL: done.toString(),
+          errorCallbackURL: `${appOrigin}/login?auth_error=oauth`,
+        },
+        headers: authHeaders,
+        asResponse: true,
+      });
+    }
 
     if (!apiRes.ok) {
       const t = await apiRes.text().catch(() => "");
-      console.error("[oauth/start] oauth init not ok", apiRes.status, t.slice(0, 200));
+      console.error(
+        "[oauth/start] oauth init not ok",
+        apiRes.status,
+        resolved,
+        t.slice(0, 300),
+      );
+      const msg =
+        apiRes.status === 429
+          ? "too_many_requests"
+          : (t || "oauth_init").slice(0, 100);
       return Response.redirect(
-        `${appOrigin}/login?auth_error=${encodeURIComponent((t || "oauth_init").slice(0, 100))}`,
+        `${appOrigin}/login?auth_error=${encodeURIComponent(msg)}`,
         302,
       );
     }
 
     const body = (await apiRes.json().catch(() => null)) as {
       url?: string;
+      redirect?: boolean;
     } | null;
     let location = body?.url;
     if (!location) {
@@ -176,7 +235,6 @@ async function handleStart(request: Request): Promise<Response> {
   } catch (err) {
     const raw = err instanceof Error ? err.message : "oauth_threw";
     console.error("[oauth/start] error", raw);
-    // Never show database_warming — auth no longer uses PGLite
     return Response.redirect(
       `${appOrigin}/login?auth_error=${encodeURIComponent(raw.slice(0, 100))}`,
       302,

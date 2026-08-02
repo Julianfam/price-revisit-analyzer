@@ -31,6 +31,26 @@ function parseCode(raw: unknown): string | undefined {
   return digits.length > 0 ? digits : undefined;
 }
 
+function friendlyAuthError(raw: string, es: boolean): string {
+  const s = raw.toLowerCase();
+  if (/too_many|rate.?limit|429|too many/i.test(s)) {
+    return es
+      ? "Demasiados intentos. Espera ~1 minuto y prueba de nuevo."
+      : "Too many attempts. Wait about 1 minute and try again.";
+  }
+  if (/invalid origin|invalid_callback|forbidden/i.test(s)) {
+    return es
+      ? "Error de configuración de login. Recarga la página e intenta otra vez."
+      : "Login config error. Reload and try again.";
+  }
+  if (/oauth|missing_url|oauth_init|oauth_threw/i.test(s)) {
+    return es
+      ? "No se pudo conectar con X/Google. Espera un momento e intenta de nuevo, o usa email."
+      : "Could not connect to X/Google. Wait a moment and try again, or use email.";
+  }
+  return raw.slice(0, 160);
+}
+
 export const Route = createFileRoute("/login")({
   validateSearch: (s: Record<string, unknown>): {
     auth_done?: string;
@@ -38,7 +58,6 @@ export const Route = createFileRoute("/login")({
     returnTo?: string;
     code?: string;
   } => {
-    // Query params may arrive as number (e.g. ?code=735082)
     const code = parseCode(s.code);
     let authError: string | undefined;
     if (s.auth_error != null && s.auth_error !== "") {
@@ -119,124 +138,61 @@ function LoginInner() {
   const [finishing, setFinishing] = useState(false);
   const [waitingHandoff, setWaitingHandoff] = useState(false);
   const [codeOpen, setCodeOpen] = useState(false);
-  const [codeInput, setCodeInput] = useState("");
+  const [codeDigits, setCodeDigits] = useState("");
   const [busyCode, setBusyCode] = useState(false);
-
-  // Always a string — never call .replace on non-string
-  const codeDigits = String(codeInput ?? "").replace(/\D/g, "").slice(0, 6);
 
   useEffect(() => {
     setMounted(true);
     setMobile(isMobileClient());
+  }, []);
+
+  useEffect(() => {
+    if (search.auth_error) {
+      setError(friendlyAuthError(search.auth_error, es));
+    }
+  }, [search.auth_error, es]);
+
+  useEffect(() => {
     if (search.code) {
       setCodeOpen(true);
-      setCodeInput(String(search.code).replace(/\D/g, "").slice(0, 6));
+      setCodeDigits(search.code);
     }
   }, [search.code]);
 
   useEffect(() => {
-    if (search.auth_error) {
-      const raw = String(search.auth_error);
-      setError(
-        raw === "1"
-          ? es
-            ? "Login cancelado o fallido"
-            : "Sign-in cancelled or failed"
-          : raw === "no_session"
-            ? es
-              ? "No quedó sesión aquí. Si X abrió su navegador, pega el código de 6 dígitos abajo."
-              : "No session here. If X opened its browser, paste the 6-digit code below."
-            : raw,
+    if (search.auth_done === "1") {
+      setFinishing(true);
+      void finishMobileAuthReturn(search.returnTo || "/").finally(() =>
+        setFinishing(false),
       );
-      setCodeOpen(true);
     }
-  }, [search.auth_error, es]);
-
-  // Auto-claim ?code=
-  useEffect(() => {
-    if (!mounted || !search.code) return;
-    let cancelled = false;
-    setFinishing(true);
-    void (async () => {
-      try {
-        const token = await claimCode(String(search.code));
-        if (cancelled) return;
-        storeToken(token);
-        await captureSessionBearer();
-        try {
-          await authClient.getSession();
-        } catch {
-          /* ignore */
-        }
-        window.location.replace(search.returnTo || "/");
-      } catch {
-        if (cancelled) return;
-        setFinishing(false);
-        setCodeOpen(true);
-        setError(
-          es
-            ? "Código inválido o expirado. Inicia con X de nuevo y copia el código nuevo."
-            : "Invalid or expired code. Sign in with X again and copy the new code.",
-        );
-        void navigate({ to: "/login", search: {}, replace: true });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [mounted, search.code, search.returnTo, es, navigate]);
+  }, [search.auth_done, search.returnTo]);
 
   useEffect(() => {
-    if (!mounted || search.auth_done !== "1") return;
-    let cancelled = false;
-    setFinishing(true);
-    void (async () => {
-      const ok = await finishMobileAuthReturn(search.returnTo ?? "/");
-      if (cancelled) return;
-      if (!ok) {
-        setFinishing(false);
-        setCodeOpen(true);
-        setError(
-          es
-            ? "Sesión no encontrada aquí. Pega el código de 6 dígitos si lo viste al terminar en X."
-            : "Session not found here. Paste the 6-digit code if you saw it after X.",
-        );
-        void navigate({ to: "/login", search: {}, replace: true });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [mounted, search.auth_done, search.returnTo, es, navigate]);
-
-  useEffect(() => {
-    if (!mounted || user) return;
     return watchAuthHandoff((token) => {
       storeToken(token);
       setWaitingHandoff(true);
       void (async () => {
         await captureSessionBearer();
-        try {
-          await authClient.getSession();
-        } catch {
-          /* ignore */
-        }
-        window.location.assign("/");
+        window.location.replace(search.returnTo || "/");
       })();
     });
-  }, [mounted, user]);
+  }, [search.returnTo]);
 
-  useEffect(() => {
-    if (!mounted || !getBearerToken()) return;
-    void authClient.getSession().catch(() => undefined);
-  }, [mounted]);
-
-  if (waitingHandoff || finishing) {
+  if (!mounted) {
     return (
-      <div className="app-shell flex min-h-dvh flex-col items-center justify-center px-4">
+      <div className="app-shell flex min-h-dvh items-center justify-center p-4">
+        <Loader2 className="size-6 animate-spin text-teal" />
+      </div>
+    );
+  }
+
+  if (finishing || waitingHandoff) {
+    return (
+      <div className="app-shell flex min-h-dvh flex-col items-center justify-center gap-3 p-4">
         <Loader2 className="size-8 animate-spin text-teal" />
-        <p className="mt-3 text-sm text-muted-fg">
-          {es ? "Completando inicio de sesión…" : "Finishing sign-in…"}
+        <p className="text-sm text-muted-fg">
+          {es ? "Completando sesión…" : "Completing sign-in…"}
         </p>
       </div>
     );
@@ -249,27 +205,20 @@ function LoginInner() {
   const onOauth = (providerId: string) => {
     setError(null);
     setOauthBusy(providerId);
-    if (mobile || isMobileClient()) {
-      try {
-        const url = buildMobileOAuthStartUrl(providerId, "/");
-        window.location.assign(url);
-      } catch (e) {
-        setOauthBusy(null);
-        setError(e instanceof Error ? e.message : "oauth_failed");
-      }
-      return;
+    // Always full-page start on production + mobile (reliable cookies / no Invalid origin)
+    try {
+      const url = buildMobileOAuthStartUrl(providerId, search.returnTo || "/");
+      window.location.assign(url);
+    } catch (e) {
+      setOauthBusy(null);
+      setError(
+        e instanceof Error
+          ? friendlyAuthError(e.message, es)
+          : es
+            ? "No se pudo iniciar sesión"
+            : "Could not sign in",
+      );
     }
-    void signIn(providerId, { callbackURL: "/" })
-      .catch((e) => {
-        setError(
-          e instanceof Error
-            ? e.message
-            : es
-              ? "No se pudo iniciar sesión"
-              : "Could not sign in",
-        );
-      })
-      .finally(() => setOauthBusy(null));
   };
 
   const onClaimCode = async () => {
@@ -315,7 +264,6 @@ function LoginInner() {
           name: email.trim().split("@")[0] || "User",
         });
         if (err) {
-          // try sign-in if already exists
           const { error: e2 } = await authClient.signIn.email({
             email: email.trim(),
             password,
@@ -339,7 +287,7 @@ function LoginInner() {
     } catch (e) {
       setError(
         e instanceof Error
-          ? e.message
+          ? friendlyAuthError(e.message, es)
           : es
             ? "No se pudo entrar con email"
             : "Email sign-in failed",
@@ -444,30 +392,20 @@ function LoginInner() {
         </button>
 
         {codeOpen && (
-          <div className="space-y-2 rounded-xl border border-teal/30 bg-card p-3">
-            <p className="text-[11px] leading-relaxed text-muted-fg">
-              {es
-                ? "Pega el código de 6 dígitos de la pantalla “Sesión lista” (válido ~10 min)."
-                : "Paste the 6-digit code from the “Signed in” screen (~10 min)."}
-            </p>
+          <div className="space-y-2 rounded-xl border border-border bg-card p-3">
             <Input
               inputMode="numeric"
               autoComplete="one-time-code"
-              placeholder="123456"
+              placeholder={es ? "Código de 6 dígitos" : "6-digit code"}
               value={codeDigits}
               onChange={(e) =>
-                setCodeInput(
-                  String(e.target.value ?? "")
-                    .replace(/\D/g, "")
-                    .slice(0, 6),
-                )
+                setCodeDigits(e.target.value.replace(/\D/g, "").slice(0, 6))
               }
-              className="h-12 text-center font-mono text-xl tracking-[0.35em]"
-              maxLength={6}
+              className="text-center font-mono text-lg tracking-widest"
             />
             <Button
               type="button"
-              className="w-full min-h-11"
+              className="w-full"
               disabled={busyCode || codeDigits.length !== 6}
               onClick={() => void onClaimCode()}
             >
@@ -482,20 +420,18 @@ function LoginInner() {
           </div>
         )}
 
-        <div className="relative py-1 text-center">
-          <span className="relative z-10 bg-bg px-2 text-[11px] uppercase tracking-wide text-muted-fg">
-            {es ? "o" : "or"}
-          </span>
-          <span className="absolute left-0 right-0 top-1/2 h-px bg-border" />
-        </div>
-
         <button
           type="button"
           onClick={() => setMailOpen((v) => !v)}
-          className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-3 py-3 text-left text-sm text-muted-fg"
+          className={cn(
+            "flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left text-sm transition-colors",
+            mailOpen
+              ? "border-teal/40 bg-teal/10 text-foreground"
+              : "border-border bg-card text-muted-fg hover:border-teal/30",
+          )}
         >
-          <span className="flex items-center gap-2 text-foreground">
-            <Mail className="size-4" />
+          <span className="flex items-center gap-2 font-medium text-foreground">
+            <Mail className="size-4 text-teal" />
             {es ? "Email y contraseña" : "Email & password"}
           </span>
           {mailOpen ? (
@@ -507,14 +443,12 @@ function LoginInner() {
 
         {mailOpen && (
           <div className="space-y-2 rounded-xl border border-border bg-card p-3">
-            <div className="flex gap-1 rounded-lg bg-muted/40 p-0.5">
+            <div className="flex gap-2 text-[11px]">
               <button
                 type="button"
                 className={cn(
-                  "flex-1 rounded-md py-1.5 text-xs font-medium",
-                  mailMode === "in"
-                    ? "bg-card text-foreground shadow-sm"
-                    : "text-muted-fg",
+                  "rounded-md px-2 py-1",
+                  mailMode === "in" ? "bg-teal/20 text-teal" : "text-muted-fg",
                 )}
                 onClick={() => setMailMode("in")}
               >
@@ -523,10 +457,8 @@ function LoginInner() {
               <button
                 type="button"
                 className={cn(
-                  "flex-1 rounded-md py-1.5 text-xs font-medium",
-                  mailMode === "up"
-                    ? "bg-card text-foreground shadow-sm"
-                    : "text-muted-fg",
+                  "rounded-md px-2 py-1",
+                  mailMode === "up" ? "bg-teal/20 text-teal" : "text-muted-fg",
                 )}
                 onClick={() => setMailMode("up")}
               >
@@ -536,24 +468,22 @@ function LoginInner() {
             <Input
               type="email"
               autoComplete="email"
-              placeholder="you@email.com"
+              placeholder="email@ejemplo.com"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="h-11"
             />
             <Input
               type="password"
               autoComplete={
                 mailMode === "up" ? "new-password" : "current-password"
               }
-              placeholder={es ? "Contraseña" : "Password"}
+              placeholder={es ? "Contraseña (mín. 6)" : "Password (min 6)"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="h-11"
             />
             <Button
               type="button"
-              className="w-full min-h-11"
+              className="w-full"
               disabled={busyMail}
               onClick={() => void onMail()}
             >
@@ -574,11 +504,13 @@ function LoginInner() {
           </div>
         )}
 
-        <p className="pt-2 text-center text-[11px] text-muted-fg">
-          <a href="/" className="text-teal underline-offset-2 hover:underline">
-            {es ? "Continuar como invitado" : "Continue as guest"}
-          </a>
-        </p>
+        <button
+          type="button"
+          className="w-full text-center text-[12px] text-muted-fg underline-offset-2 hover:underline"
+          onClick={() => navigate({ to: "/" })}
+        >
+          {es ? "Continuar como invitado" : "Continue as guest"}
+        </button>
       </div>
     </div>
   );

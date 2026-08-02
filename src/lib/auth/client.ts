@@ -2,9 +2,8 @@
  * Browser auth client.
  *
  * Desktop live preview: /auth/popup (Vite plugin) popup + bearer postMessage.
- * Mobile: window.open → /api/oauth/start → broker → /api/oauth/done
- *   which postMessages the bearer back to the opener (preview) so the
- *   Grok iframe stays logged in (not a stranded “sub web”).
+ * Mobile + production Vercel: window.location → /api/oauth/start → provider
+ *   → callback (native X/Google or Grok broker).
  */
 import { genericOAuthClient } from "better-auth/client/plugins";
 import { createAuthClient } from "better-auth/react";
@@ -88,6 +87,17 @@ function inLivePreview(): boolean {
   );
 }
 
+/** Production / staging hosts where popup OAuth is unreliable. */
+function isDeployedHost(): boolean {
+  if (typeof window === "undefined") return false;
+  const h = window.location.hostname;
+  return (
+    h.endsWith(".vercel.app") ||
+    h.endsWith(".now.sh") ||
+    (!inLivePreview() && h !== "localhost" && h !== "127.0.0.1")
+  );
+}
+
 export function isMobileClient(): boolean {
   if (typeof window === "undefined" || typeof navigator === "undefined") {
     return false;
@@ -139,7 +149,7 @@ export function buildAuthPopupUrl(
   return `${origin}/auth/popup?${q.toString()}`;
 }
 
-/** Real API route — always exists (mobile safe, no Not Found). */
+/** Real API route — always exists (mobile + Vercel safe, no Not Found). */
 export function buildMobileOAuthStartUrl(
   providerId: string,
   returnTo = "/",
@@ -172,7 +182,6 @@ function waitForAuthResult(
     };
 
     const onMessage = (event: MessageEvent) => {
-      // Accept same-origin only for the token payload
       if (event.origin !== origin && event.origin !== "null") return;
       const data = event.data as PopupMessage | undefined;
       if (!data || data.source !== "grok-auth-popup") return;
@@ -252,6 +261,9 @@ async function applyTokenAndGo(
 
 /**
  * Sign in with X / Google. Call from a click handler (sync open first).
+ *
+ * Production (Vercel): always full-page /api/oauth/start — avoids Invalid origin
+ * from client POST and survives in-app browsers better.
  */
 export async function signIn(
   providerId: string,
@@ -260,18 +272,15 @@ export async function signIn(
   const callbackURL = opts.callbackURL ?? "/";
   storeBearer(null);
 
-  if (inLivePreview()) {
-    // ── MOBILE: SAME-FRAME navigation ───────────────────────────────────
-    // window.open leaves a stranded X tab and the preview never gets the
-    // session (WebView + external browser = separate storage). Navigate
-    // this frame through /api/oauth/start → broker → /api/oauth/done → home.
-    if (isMobileClient()) {
-      const url = buildMobileOAuthStartUrl(providerId, callbackURL);
-      window.location.assign(url);
-      return new Promise(() => undefined);
-    }
+  // Production Vercel / any non-preview host: same-frame OAuth start
+  if (isDeployedHost() || isMobileClient()) {
+    const url = buildMobileOAuthStartUrl(providerId, callbackURL);
+    window.location.assign(url);
+    return new Promise(() => undefined);
+  }
 
-    // ── DESKTOP: classic popup ───────────────────────────────────────────
+  if (inLivePreview()) {
+    // Desktop live preview: popup
     const url = buildAuthPopupUrl(providerId, "popup", callbackURL);
     const popup = window.open(
       url,
@@ -301,13 +310,29 @@ export async function signIn(
     return new Promise(() => undefined);
   }
 
-  // ── Deployed ───────────────────────────────────────────────────────────
+  // Fallback: relative callbackURL (always trusted)
   const { data, error } = await authClient.signIn.oauth2({
     providerId,
-    callbackURL,
+    callbackURL:
+      callbackURL.startsWith("/") && !callbackURL.startsWith("//")
+        ? callbackURL
+        : "/",
     errorCallbackURL: opts.errorCallbackURL ?? "/login",
   });
-  if (error) throw new Error(error.message ?? "Sign-in failed");
+  if (error) {
+    const msg = error.message ?? "Sign-in failed";
+    if (/too many|rate.?limit|429/i.test(msg)) {
+      throw new Error(
+        "Too many sign-in attempts. Wait ~1 minute and try again.",
+      );
+    }
+    if (/invalid origin|forbidden|invalid callback/i.test(msg)) {
+      throw new Error(
+        "Auth origin misconfigured. Use /api/oauth/start or set BETTER_AUTH_URL.",
+      );
+    }
+    throw new Error(msg);
+  }
   if (data?.url) {
     window.location.assign(data.url);
     return new Promise(() => undefined);
