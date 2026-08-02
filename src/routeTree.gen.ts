@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as ApiAuthSplatRouteImport } from './routes/api/auth/$'
+import { Route as ApiAuthStatusRouteImport } from './routes/api/auth/status'
 import { Route as ApiBillingConfigRouteImport } from './routes/api/billing/config'
 import { Route as ApiBillingLemonRouteImport } from './routes/api/billing/lemon'
 import { Route as ApiOauthClaimRouteImport } from './routes/api/oauth/claim'
@@ -33,6 +34,11 @@ const LoginRoute = LoginRouteImport.update({
 const ApiAuthSplatRoute = ApiAuthSplatRouteImport.update({
   id: '/api/auth/$',
   path: '/api/auth/$',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiAuthStatusRoute = ApiAuthStatusRouteImport.update({
+  id: '/api/auth/status',
+  path: '/api/auth/status',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiBillingConfigRoute = ApiBillingConfigRouteImport.update({
@@ -75,6 +81,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/auth/status': typeof ApiAuthStatusRoute
   '/api/billing/config': typeof ApiBillingConfigRoute
   '/api/billing/lemon': typeof ApiBillingLemonRoute
   '/api/oauth/claim': typeof ApiOauthClaimRoute
@@ -87,6 +94,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/auth/status': typeof ApiAuthStatusRoute
   '/api/billing/config': typeof ApiBillingConfigRoute
   '/api/billing/lemon': typeof ApiBillingLemonRoute
   '/api/oauth/claim': typeof ApiOauthClaimRoute
@@ -100,6 +108,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/login': typeof LoginRoute
   '/api/auth/$': typeof ApiAuthSplatRoute
+  '/api/auth/status': typeof ApiAuthStatusRoute
   '/api/billing/config': typeof ApiBillingConfigRoute
   '/api/billing/lemon': typeof ApiBillingLemonRoute
   '/api/oauth/claim': typeof ApiOauthClaimRoute
@@ -114,6 +123,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/api/auth/$'
+    | '/api/auth/status'
     | '/api/billing/config'
     | '/api/billing/lemon'
     | '/api/oauth/claim'
@@ -126,6 +136,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/api/auth/$'
+    | '/api/auth/status'
     | '/api/billing/config'
     | '/api/billing/lemon'
     | '/api/oauth/claim'
@@ -138,6 +149,7 @@ export interface FileRouteTypes {
     | '/'
     | '/login'
     | '/api/auth/$'
+    | '/api/auth/status'
     | '/api/billing/config'
     | '/api/billing/lemon'
     | '/api/oauth/claim'
@@ -151,6 +163,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   LoginRoute: typeof LoginRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
+  ApiAuthStatusRoute: typeof ApiAuthStatusRoute
   ApiBillingConfigRoute: typeof ApiBillingConfigRoute
   ApiBillingLemonRoute: typeof ApiBillingLemonRoute
   ApiOauthClaimRoute: typeof ApiOauthClaimRoute
@@ -181,6 +194,13 @@ declare module '@tanstack/react-router' {
       path: '/api/auth/$'
       fullPath: '/api/auth/$'
       preLoaderRoute: typeof ApiAuthSplatRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/auth/status': {
+      id: '/api/auth/status'
+      path: '/api/auth/status'
+      fullPath: '/api/auth/status'
+      preLoaderRoute: typeof ApiAuthStatusRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/billing/config': {
@@ -239,6 +259,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   LoginRoute: LoginRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
+  ApiAuthStatusRoute: ApiAuthStatusRoute,
   ApiBillingConfigRoute: ApiBillingConfigRoute,
   ApiBillingLemonRoute: ApiBillingLemonRoute,
   ApiOauthClaimRoute: ApiOauthClaimRoute,
