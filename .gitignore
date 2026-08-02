@@ -14,3 +14,7 @@ attachments
 tmp
 .grok
 vendor
+
+.vercel-*-files.json
+vercel-deploy-payload.json
+scripts/vercel-deploy-files.json
