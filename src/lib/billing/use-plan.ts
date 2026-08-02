@@ -16,6 +16,7 @@ import {
 import { activatePro } from "@/lib/billing/server";
 import { fetchMyPlan, postPlanAction } from "@/lib/billing/plan-api";
 import { getBearerToken } from "@/lib/auth/client";
+import { isLocalMode, LOCAL_PRO_ENTITLEMENTS } from "@/lib/local-mode";
 
 const PLAN_CACHE_KEY = "pra-plan-cache-v1";
 
@@ -97,6 +98,7 @@ export type PlanState = {
   setViewAs: (m: ViewAsMode) => void;
   loading: boolean;
   freeAnalysesPerDay: number;
+  localMode: boolean;
   refresh: () => Promise<void>;
   beginTrial: () => Promise<boolean>;
   subscribePro: (opts?: {
@@ -111,6 +113,9 @@ function initialFromCache(): {
   isGod: boolean;
   loading: boolean;
 } {
+  if (isLocalMode()) {
+    return { ent: { ...LOCAL_PRO_ENTITLEMENTS }, isGod: false, loading: false };
+  }
   if (typeof window === "undefined") {
     return { ent: GUEST_ENTITLEMENTS, isGod: false, loading: true };
   }
@@ -120,13 +125,13 @@ function initialFromCache(): {
     return { ent: cache.entitlements, isGod: cache.isGod, loading: true };
   }
   if (hasBearer) {
-    // Optimistic premium-safe: don't flash Free while session restores
     return { ent: GUEST_ENTITLEMENTS, isGod: false, loading: true };
   }
   return { ent: GUEST_ENTITLEMENTS, isGod: false, loading: true };
 }
 
 export function usePlan(): PlanState {
+  const localMode = isLocalMode();
   const { user, isPending } = useCurrentUserState();
   const boot = useMemo(() => initialFromCache(), []);
   const [serverEntitlements, setServerEntitlements] = useState<Entitlements>(
@@ -151,11 +156,17 @@ export function usePlan(): PlanState {
   );
 
   const isGod =
-    serverIsGod || (signedIn && clientGodGuess) || !!user?.isDevFallback;
+    !localMode &&
+    (serverIsGod || (signedIn && clientGodGuess) || !!user?.isDevFallback);
 
   const refresh = useCallback(async () => {
+    if (localMode) {
+      setServerEntitlements({ ...LOCAL_PRO_ENTITLEMENTS });
+      setServerIsGod(false);
+      setLoading(false);
+      return;
+    }
     if (!signedIn && !user?.isDevFallback) {
-      // Keep cache while session still might restore (bearer present)
       if (getBearerToken()) {
         setLoading(true);
         return;
@@ -188,7 +199,6 @@ export function usePlan(): PlanState {
         setServerEntitlements({ ...GOD_ENTITLEMENTS });
         writePlanCache(GOD_ENTITLEMENTS, true);
       } else {
-        // Keep last known premium cache — never demote on network blip
         const cache = readPlanCache();
         if (cache?.entitlements?.isPremium || cache?.isGod) {
           setServerEntitlements(cache.entitlements);
@@ -198,18 +208,23 @@ export function usePlan(): PlanState {
     } finally {
       setLoading(false);
     }
-  }, [signedIn, user?.isDevFallback, clientGodGuess]);
+  }, [localMode, signedIn, user?.isDevFallback, clientGodGuess]);
 
   useEffect(() => {
+    if (localMode) {
+      setServerEntitlements({ ...LOCAL_PRO_ENTITLEMENTS });
+      setLoading(false);
+      return;
+    }
     if (isPending) {
-      // Stay loading while auth restores — prevents Free flash
       setLoading(true);
       return;
     }
     void refresh();
-  }, [isPending, refresh, user?.id]);
+  }, [localMode, isPending, refresh, user?.id]);
 
   useEffect(() => {
+    if (localMode) return;
     if (clientGodGuess && signedIn) {
       setServerIsGod(true);
       setServerEntitlements((prev) =>
@@ -217,14 +232,22 @@ export function usePlan(): PlanState {
       );
       writePlanCache(GOD_ENTITLEMENTS, true);
     }
-  }, [clientGodGuess, signedIn, user?.id]);
+  }, [localMode, clientGodGuess, signedIn, user?.id]);
 
-  const entitlements = useMemo(
-    () => applyViewAs(isGod, isGod ? viewAs : "pro", serverEntitlements),
-    [isGod, viewAs, serverEntitlements],
-  );
+  const entitlements = useMemo(() => {
+    if (localMode) {
+      return {
+        ...LOCAL_PRO_ENTITLEMENTS,
+        isGod: false,
+        viewAs: "pro" as ViewAsMode,
+        realPlan: "pro" as const,
+      };
+    }
+    return applyViewAs(isGod, isGod ? viewAs : "pro", serverEntitlements);
+  }, [localMode, isGod, viewAs, serverEntitlements]);
 
   const beginTrial = useCallback(async () => {
+    if (localMode) return true;
     if (!signedIn) return false;
     if (isGod) {
       setServerEntitlements({ ...GOD_ENTITLEMENTS });
@@ -253,10 +276,11 @@ export function usePlan(): PlanState {
     } catch {
       return false;
     }
-  }, [signedIn, isGod, refresh]);
+  }, [localMode, signedIn, isGod, refresh]);
 
   const subscribePro = useCallback(
     async (opts?: { unlockCode?: string; paymentRef?: string }) => {
+      if (localMode) return true;
       if (!signedIn) return false;
       try {
         const res = (await activatePro({
@@ -287,10 +311,13 @@ export function usePlan(): PlanState {
         return false;
       }
     },
-    [signedIn, refresh, clientGodGuess],
+    [localMode, signedIn, refresh, clientGodGuess],
   );
 
   const tryConsumeAnalysis = useCallback(async (): Promise<ConsumeResult> => {
+    if (localMode) {
+      return { ok: true, remaining: null };
+    }
     if (isGod && viewAs !== "free") {
       return { ok: true, remaining: null };
     }
@@ -368,20 +395,18 @@ export function usePlan(): PlanState {
       if (serverEntitlements.isPremium) {
         return { ok: true, remaining: null };
       }
-      return { ok: false as const, reason: "network", remaining: 0 };
+      return consumeLocal("pra-guest-analyses", "none");
     }
-  }, [signedIn, isGod, viewAs, serverEntitlements.isPremium]);
-
-  // While auth is pending, treat plan as loading so Free banner stays hidden
-  const effectiveLoading = isPending || loading;
+  }, [localMode, isGod, viewAs, serverEntitlements.isPremium, signedIn]);
 
   return {
     entitlements,
     isGod,
-    viewAs: isGod ? viewAs : "pro",
+    viewAs,
     setViewAs,
-    loading: effectiveLoading,
+    loading,
     freeAnalysesPerDay,
+    localMode,
     refresh,
     beginTrial,
     subscribePro,

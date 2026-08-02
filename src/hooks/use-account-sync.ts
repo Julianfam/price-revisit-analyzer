@@ -16,6 +16,7 @@ import { getMySettings, saveMySettings } from "@/lib/user-data/server";
 import { useI18n, type Lang } from "@/lib/i18n";
 import { useEmailAlertPrefs } from "@/lib/email-alerts";
 import { getBearerToken } from "@/lib/auth/client";
+import { isLocalMode } from "@/lib/local-mode";
 
 function waitForAlertsHydrated(): Promise<void> {
   const persistApi = usePriceAlerts.persist;
@@ -122,6 +123,7 @@ export type AccountSyncStatus =
   | "local";
 
 export function useAccountSync(params: AccountSyncParams) {
+  const localMode = isLocalMode();
   const { user, isPending } = useCurrentUserState();
   const { lang, setLang } = useI18n();
   const alerts = usePriceAlerts((s) => s.alerts);
@@ -320,6 +322,14 @@ export function useAccountSync(params: AccountSyncParams) {
   );
 
   useEffect(() => {
+    // Local-first product mode: never touch cloud (no sync errors)
+    if (localMode) {
+      syncedUser.current = null;
+      setStatus("guest");
+      setAlertCountCloud(null);
+      setAccountKey(null);
+      return;
+    }
     if (isPending) {
       setStatus("loading");
       return;
@@ -337,9 +347,10 @@ export function useAccountSync(params: AccountSyncParams) {
     }
     loginAttempts.current = 0;
     void pullFromServer({ reason: "login" });
-  }, [user?.id, user?.isDevFallback, isPending, pullFromServer]);
+  }, [localMode, user?.id, user?.isDevFallback, isPending, pullFromServer]);
 
   useEffect(() => {
+    if (localMode) return;
     if (!user || user.isDevFallback) return;
     const kick = (force: boolean) => {
       void pullFromServer({ silent: true, reason: "focus", force });
@@ -364,10 +375,11 @@ export function useAccountSync(params: AccountSyncParams) {
       window.removeEventListener("focus", onShow);
       window.clearInterval(interval);
     };
-  }, [user?.id, user?.isDevFallback, pullFromServer]);
+  }, [localMode, user?.id, user?.isDevFallback, pullFromServer]);
 
   // Live push — any status except guest (don't wait for "synced")
   useEffect(() => {
+    if (localMode) return;
     if (!user || user.isDevFallback) return;
     if (!getBearerToken()) return;
     if (status === "guest") return;
@@ -396,9 +408,10 @@ export function useAccountSync(params: AccountSyncParams) {
     return () => {
       if (pushTimer.current) clearTimeout(pushTimer.current);
     };
-  }, [alerts, user?.id, user?.isDevFallback, status]);
+  }, [localMode, alerts, user?.id, user?.isDevFallback, status]);
 
   useEffect(() => {
+    if (localMode) return;
     if (!user || user.isDevFallback) return;
     const tmr = setTimeout(() => {
       const p = paramsRef.current;
@@ -414,6 +427,7 @@ export function useAccountSync(params: AccountSyncParams) {
     }, 1200);
     return () => clearTimeout(tmr);
   }, [
+    localMode,
     user?.id,
     user?.isDevFallback,
     lang,
@@ -424,18 +438,23 @@ export function useAccountSync(params: AccountSyncParams) {
   ]);
 
   const syncNow = useCallback(() => {
+    if (localMode) return Promise.resolve();
     syncedUser.current = null;
     loginAttempts.current = 0;
     return pullFromServer({ reason: "manual", force: true });
-  }, [pullFromServer]);
+  }, [localMode, pullFromServer]);
 
   return {
-    status,
-    lastSyncedAt,
-    alertCountCloud,
-    accountKey,
-    isCloud: Boolean(user && !user.isDevFallback && status === "synced"),
-    wantsCloud: Boolean(user && !user.isDevFallback),
+    status: localMode ? "guest" : status,
+    lastSyncedAt: localMode ? null : lastSyncedAt,
+    alertCountCloud: localMode ? null : alertCountCloud,
+    accountKey: localMode ? null : accountKey,
+    isCloud: localMode
+      ? false
+      : Boolean(user && !user.isDevFallback && status === "synced"),
+    wantsCloud: localMode
+      ? false
+      : Boolean(user && !user.isDevFallback),
     syncNow,
   };
 }

@@ -1,9 +1,10 @@
 import { Link } from "@tanstack/react-router";
-import { Crown, LogIn, LogOut, User } from "lucide-react";
+import { Crown, HardDrive, LogIn, LogOut, User } from "lucide-react";
 import { authEnabled, signOut } from "@/lib/auth/client";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { useI18n } from "@/lib/i18n";
 import type { Entitlements } from "@/lib/billing/plans";
+import { isLocalMode } from "@/lib/local-mode";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -13,7 +14,6 @@ export function AccountMenu({
   onUpgrade,
   isGod,
   viewAs,
-  /** On mobile show a fuller chip (name always readable). */
   dense = false,
 }: {
   entitlements?: Entitlements;
@@ -24,6 +24,24 @@ export function AccountMenu({
 }) {
   const { t, lang } = useI18n();
   const { user, isPending } = useCurrentUserState();
+  const localMode = isLocalMode();
+
+  if (localMode) {
+    return (
+      <Badge
+        variant="outline"
+        className="gap-1 border-teal/35 bg-teal/10 text-teal"
+        title={
+          lang === "es"
+            ? "Modo local · alertas y datos en este dispositivo"
+            : "Local mode · alerts & data on this device"
+        }
+      >
+        <HardDrive className="size-3" />
+        {lang === "es" ? "Local · Pro" : "Local · Pro"}
+      </Badge>
+    );
+  }
 
   if (!authEnabled) {
     return (

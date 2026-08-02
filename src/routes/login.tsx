@@ -3,6 +3,7 @@ import {
   Activity,
   ChevronDown,
   ChevronUp,
+  HardDrive,
   KeyRound,
   Loader2,
   Mail,
@@ -19,20 +20,10 @@ import {
 } from "@/lib/auth/client";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import { I18nProvider, useI18n } from "@/lib/i18n";
+import { isLocalMode } from "@/lib/local-mode";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-
-type AuthStatus = {
-  x: { mode: string; available: boolean };
-  google: { mode: string; available: boolean };
-  durableDb: boolean;
-  setup: {
-    needDatabase: boolean;
-    needTwitterKeys: boolean;
-    twitterCallback: string | null;
-  };
-};
 
 function parseCode(raw: unknown): string | undefined {
   if (raw == null || raw === "") return undefined;
@@ -48,23 +39,13 @@ function friendlyAuthError(raw: string, es: boolean): string {
     )
   ) {
     return es
-      ? "X en Vercel necesita tu propia app de X (Client ID/Secret). Mientras, entra con email."
-      : "X on Vercel needs your own X app (Client ID/Secret). For now, sign in with email.";
+      ? "Login cloud no está activo. Usa la app en modo local (sin cuenta)."
+      : "Cloud login is off. Use the app in local mode (no account).";
   }
   if (/too_many|rate.?limit|429|too many/i.test(s)) {
     return es
-      ? "Demasiados intentos. Espera ~1 minuto y prueba de nuevo."
-      : "Too many attempts. Wait about 1 minute and try again.";
-  }
-  if (/invalid origin|invalid_callback|forbidden/i.test(s)) {
-    return es
-      ? "Error de configuración de login. Recarga e intenta otra vez, o usa email."
-      : "Login config error. Reload and try again, or use email.";
-  }
-  if (/oauth|missing_url|oauth_init|oauth_threw/i.test(s)) {
-    return es
-      ? "No se pudo conectar con X/Google. Usa email mientras configuramos OAuth nativo."
-      : "Could not connect to X/Google. Use email until native OAuth is configured.";
+      ? "Demasiados intentos. Espera ~1 minuto."
+      : "Too many attempts. Wait about 1 minute.";
   }
   return raw.slice(0, 160);
 }
@@ -144,11 +125,10 @@ function LoginInner() {
   const search = Route.useSearch();
   const navigate = useNavigate();
   const { user, isPending } = useCurrentUserState();
+  const localMode = isLocalMode();
 
   const [mounted, setMounted] = useState(false);
   const [mobile, setMobile] = useState(false);
-  const [status, setStatus] = useState<AuthStatus | null>(null);
-
   const [mailOpen, setMailOpen] = useState(false);
   const [mailMode, setMailMode] = useState<"in" | "up">("up");
   const [email, setEmail] = useState("");
@@ -165,24 +145,11 @@ function LoginInner() {
   useEffect(() => {
     setMounted(true);
     setMobile(isMobileClient());
-    void fetch("/api/auth/status", { credentials: "same-origin" })
-      .then((r) => r.json())
-      .then((j: AuthStatus) => {
-        setStatus(j);
-        // Auto-open email when X is not available on this host
-        if (!j.x?.available || j.setup?.needTwitterKeys || search.mail === "1") {
-          setMailOpen(true);
-        }
-      })
-      .catch(() => {
-        /* ignore */
-      });
-  }, [search.mail]);
+  }, []);
 
   useEffect(() => {
     if (search.auth_error) {
       setError(friendlyAuthError(search.auth_error, es));
-      setMailOpen(true);
     }
   }, [search.auth_error, es]);
 
@@ -221,6 +188,39 @@ function LoginInner() {
     );
   }
 
+  // ── Local-first: no login required ───────────────────────────────────
+  if (localMode) {
+    return (
+      <div className="app-shell flex min-h-dvh flex-col items-center justify-center px-4 py-8">
+        <div className="w-full max-w-sm space-y-4 text-center">
+          <div className="mx-auto flex size-12 items-center justify-center rounded-xl border border-teal/30 bg-teal/10 text-teal">
+            <HardDrive className="size-6" />
+          </div>
+          <h1 className="text-xl font-semibold text-foreground">
+            {es ? "Modo local activo" : "Local mode is on"}
+          </h1>
+          <p className="text-sm leading-relaxed text-muted-fg">
+            {es
+              ? "No hace falta cuenta. Análisis, Quantum, Scalper y alertas corren Pro en este dispositivo (localStorage). Sin sync entre PC y móvil por ahora."
+              : "No account needed. Analyze, Quantum, Scalper and alerts run Pro on this device (localStorage). No PC↔mobile sync for now."}
+          </p>
+          <Button
+            type="button"
+            className="w-full min-h-12"
+            onClick={() => navigate({ to: search.returnTo || "/" })}
+          >
+            {es ? "Entrar a la app" : "Open the app"}
+          </Button>
+          <p className="text-[11px] text-muted-fg">
+            {es
+              ? "Login con X/Google se reactivará cuando pongas keys nativas + Postgres."
+              : "X/Google login returns when you add native keys + Postgres."}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   if (finishing || waitingHandoff) {
     return (
       <div className="app-shell flex min-h-dvh flex-col items-center justify-center gap-3 p-4">
@@ -236,24 +236,8 @@ function LoginInner() {
     return <Navigate to="/" />;
   }
 
-  const xAvailable = status?.x?.available !== false;
-  const googleAvailable = status?.google?.available !== false;
-  // While status loads, allow clicks (start route will redirect cleanly)
-  const xReady = status == null || xAvailable;
-  const googleReady = status == null || googleAvailable;
-
   const onOauth = (providerId: string) => {
     setError(null);
-    if (providerId === "grok-x" && status && !status.x.available) {
-      setError(friendlyAuthError("need_twitter_keys", es));
-      setMailOpen(true);
-      return;
-    }
-    if (providerId === "grok-google" && status && !status.google.available) {
-      setError(friendlyAuthError("need_google_keys", es));
-      setMailOpen(true);
-      return;
-    }
     setOauthBusy(providerId);
     try {
       const url = buildMobileOAuthStartUrl(providerId, search.returnTo || "/");
@@ -277,17 +261,12 @@ function LoginInner() {
       const token = await claimCode(codeDigits);
       storeToken(token);
       await captureSessionBearer();
-      try {
-        await authClient.getSession();
-      } catch {
-        /* ignore */
-      }
       window.location.replace(search.returnTo || "/");
     } catch {
       setError(
         es
-          ? "Código inválido o expirado. Vuelve a iniciar con X y copia el código nuevo."
-          : "Invalid or expired code. Tap Continue with X again and copy the new code.",
+          ? "Código inválido o expirado."
+          : "Invalid or expired code.",
       );
     } finally {
       setBusyCode(false);
@@ -327,20 +306,9 @@ function LoginInner() {
         if (err) throw new Error(err.message || "sign_in_failed");
       }
       await captureSessionBearer();
-      try {
-        await authClient.getSession();
-      } catch {
-        /* ignore */
-      }
       window.location.assign(search.returnTo || "/");
     } catch (e) {
-      setError(
-        e instanceof Error
-          ? friendlyAuthError(e.message, es)
-          : es
-            ? "No se pudo entrar con email"
-            : "Email sign-in failed",
-      );
+      setError(e instanceof Error ? e.message : "Email failed");
     } finally {
       setBusyMail(false);
     }
@@ -364,36 +332,13 @@ function LoginInner() {
           <h1 className="text-xl font-semibold tracking-tight text-foreground">
             Price Revisit Analyzer
           </h1>
-          <p className="mt-1 text-sm text-muted-fg">
-            {es ? "Entra en un toque" : "Sign in in one tap"}
-          </p>
         </div>
 
-        {status?.setup?.needTwitterKeys && (
-          <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-amber-50">
-            <p className="font-semibold text-amber-100">
-              {es
-                ? "X en Vercel requiere tu app de X"
-                : "X on Vercel needs your X developer app"}
-            </p>
-            <p className="mt-1 text-amber-100/90">
-              {es
-                ? "El login vía Grok solo funciona en el preview. En producción hay que poner TWITTER_CLIENT_ID y TWITTER_CLIENT_SECRET en Vercel. Mientras tanto usa email."
-                : "Grok broker login only works in the live preview. Production needs TWITTER_CLIENT_ID + TWITTER_CLIENT_SECRET in Vercel. Use email for now."}
-            </p>
-            {status.setup.twitterCallback && (
-              <p className="mt-2 break-all font-mono text-[10px] text-amber-100/80">
-                Callback: {status.setup.twitterCallback}
-              </p>
-            )}
-          </div>
-        )}
-
         {(mobile || (mounted && isMobileClient())) && (
-          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-amber-100">
+          <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12px] text-amber-100">
             {es
-              ? "Móvil / Brave: si X abre su navegador, usa el código de 6 dígitos o entra con email."
-              : "Mobile / Brave: if X opens its own browser, use the 6-digit code or sign in with email."}
+              ? "Móvil: si X abre su navegador, usa código o email."
+              : "Mobile: if X opens its browser, use code or email."}
           </div>
         )}
 
@@ -407,77 +352,45 @@ function LoginInner() {
           <Button
             type="button"
             variant="outline"
-            className="w-full min-h-12 gap-2 border-zinc-200 bg-zinc-100 font-semibold text-zinc-950 hover:bg-white hover:text-zinc-950 disabled:opacity-60"
+            className="w-full min-h-12 gap-2 border-zinc-200 bg-zinc-100 font-semibold text-zinc-950"
             onClick={() => onOauth("grok-x")}
-            disabled={!!oauthBusy || !xReady}
+            disabled={!!oauthBusy}
           >
             {oauthBusy === "grok-x" ? (
               <Loader2 className="size-4 animate-spin text-zinc-950" />
             ) : (
-              <span className="text-lg font-black leading-none text-zinc-950">
-                X
-              </span>
+              <span className="text-lg font-black text-zinc-950">X</span>
             )}
             <span className="text-zinc-950">
-              {!xReady
-                ? es
-                  ? "X (configurar en Vercel)"
-                  : "X (setup in Vercel)"
-                : es
-                  ? "Continuar con X"
-                  : "Continue with X"}
+              {es ? "Continuar con X" : "Continue with X"}
             </span>
           </Button>
-
           <Button
             type="button"
             variant="outline"
-            className="w-full min-h-12 gap-2 border-border bg-card font-semibold text-foreground disabled:opacity-60"
+            className="w-full min-h-12"
             onClick={() => onOauth("grok-google")}
-            disabled={!!oauthBusy || !googleReady}
+            disabled={!!oauthBusy}
           >
-            {oauthBusy === "grok-google" ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              <span className="text-sm font-bold text-[#4285F4]">G</span>
-            )}
-            {!googleReady
-              ? es
-                ? "Google (configurar en Vercel)"
-                : "Google (setup in Vercel)"
-              : es
-                ? "Continuar con Google"
-                : "Continue with Google"}
+            {es ? "Continuar con Google" : "Continue with Google"}
           </Button>
         </div>
 
         <button
           type="button"
           onClick={() => setCodeOpen((v) => !v)}
-          className={cn(
-            "flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left text-sm transition-colors",
-            codeOpen
-              ? "border-teal/40 bg-teal/10 text-foreground"
-              : "border-border bg-card text-muted-fg hover:border-teal/30",
-          )}
+          className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-3 py-3 text-sm"
         >
-          <span className="flex items-center gap-2 font-medium text-foreground">
+          <span className="flex items-center gap-2 font-medium">
             <KeyRound className="size-4 text-teal" />
             {es ? "Tengo un código" : "I have a code"}
           </span>
-          {codeOpen ? (
-            <ChevronUp className="size-4" />
-          ) : (
-            <ChevronDown className="size-4" />
-          )}
+          {codeOpen ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
         </button>
-
         {codeOpen && (
           <div className="space-y-2 rounded-xl border border-border bg-card p-3">
             <Input
               inputMode="numeric"
-              autoComplete="one-time-code"
-              placeholder={es ? "Código de 6 dígitos" : "6-digit code"}
               value={codeDigits}
               onChange={(e) =>
                 setCodeDigits(e.target.value.replace(/\D/g, "").slice(0, 6))
@@ -490,13 +403,7 @@ function LoginInner() {
               disabled={busyCode || codeDigits.length !== 6}
               onClick={() => void onClaimCode()}
             >
-              {busyCode ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : es ? (
-                "Entrar con código"
-              ) : (
-                "Sign in with code"
-              )}
+              {busyCode ? <Loader2 className="size-4 animate-spin" /> : es ? "Entrar" : "Sign in"}
             </Button>
           </div>
         )}
@@ -504,26 +411,28 @@ function LoginInner() {
         <button
           type="button"
           onClick={() => setMailOpen((v) => !v)}
-          className={cn(
-            "flex w-full items-center justify-between rounded-xl border px-3 py-3 text-left text-sm transition-colors",
-            mailOpen
-              ? "border-teal/40 bg-teal/10 text-foreground"
-              : "border-border bg-card text-muted-fg hover:border-teal/30",
-          )}
+          className="flex w-full items-center justify-between rounded-xl border border-border bg-card px-3 py-3 text-sm"
         >
-          <span className="flex items-center gap-2 font-medium text-foreground">
+          <span className="flex items-center gap-2 font-medium">
             <Mail className="size-4 text-teal" />
-            {es ? "Email y contraseña (recomendado ahora)" : "Email & password (recommended now)"}
+            {es ? "Email y contraseña" : "Email & password"}
           </span>
-          {mailOpen ? (
-            <ChevronUp className="size-4" />
-          ) : (
-            <ChevronDown className="size-4" />
-          )}
+          {mailOpen ? <ChevronUp className="size-4" /> : <ChevronDown className="size-4" />}
         </button>
-
         {mailOpen && (
-          <div className="space-y-2 rounded-xl border border-teal/30 bg-card p-3">
+          <div className="space-y-2 rounded-xl border border-border bg-card p-3">
+            <Input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="email@ejemplo.com"
+            />
+            <Input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder={es ? "Contraseña" : "Password"}
+            />
             <div className="flex gap-2 text-[11px]">
               <button
                 type="button"
@@ -543,52 +452,17 @@ function LoginInner() {
                 )}
                 onClick={() => setMailMode("up")}
               >
-                {es ? "Crear cuenta" : "Sign up"}
+                {es ? "Crear" : "Sign up"}
               </button>
             </div>
-            <Input
-              type="email"
-              autoComplete="email"
-              placeholder="email@ejemplo.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
-            <Input
-              type="password"
-              autoComplete={
-                mailMode === "up" ? "new-password" : "current-password"
-              }
-              placeholder={es ? "Contraseña (mín. 6)" : "Password (min 6)"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-            />
             <Button
               type="button"
               className="w-full"
               disabled={busyMail}
               onClick={() => void onMail()}
             >
-              {busyMail ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : mailMode === "up" ? (
-                es ? (
-                  "Crear e entrar"
-                ) : (
-                  "Create & sign in"
-                )
-              ) : es ? (
-                "Entrar"
-              ) : (
-                "Sign in"
-              )}
+              {busyMail ? <Loader2 className="size-4 animate-spin" /> : es ? "Continuar" : "Continue"}
             </Button>
-            {status?.setup?.needDatabase && (
-              <p className="text-[11px] text-amber-200/90">
-                {es
-                  ? "Aviso: sin DATABASE_URL en Vercel la sesión puede no persistir. Añade un Postgres (Neon) en variables de entorno."
-                  : "Note: without DATABASE_URL on Vercel the session may not persist. Add Postgres (Neon) env vars."}
-              </p>
-            )}
           </div>
         )}
 
@@ -597,7 +471,7 @@ function LoginInner() {
           className="w-full text-center text-[12px] text-muted-fg underline-offset-2 hover:underline"
           onClick={() => navigate({ to: "/" })}
         >
-          {es ? "Continuar como invitado" : "Continue as guest"}
+          {es ? "Continuar sin cuenta" : "Continue without account"}
         </button>
       </div>
     </div>

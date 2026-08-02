@@ -7,6 +7,7 @@ import {
   resolveEntitlements,
 } from "@/lib/billing/plans";
 import { isGodUser } from "@/lib/billing/god-mode";
+import { isLocalMode } from "@/lib/local-mode";
 import { getSql } from "@/lib/db";
 import { runAnalysis } from "./engine";
 import {
@@ -47,6 +48,16 @@ async function planCapsForUser(
   email?: string | null,
   name?: string | null,
 ) {
+  // Local-first: full Pro caps for everyone (no OAuth / freemium wall)
+  if (isLocalMode()) {
+    return {
+      maxScenarios: 5,
+      maxRecentRevisits: 12,
+      isPremium: true,
+      canAnalyze: true,
+      canScalper: true,
+    };
+  }
   if (!userId) {
     return {
       maxScenarios: FREE_TOP_SCENARIOS,
