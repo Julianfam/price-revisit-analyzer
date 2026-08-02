@@ -1,0 +1,16 @@
+node_modules
+.DS_Store
+.env
+.env.*
+!.env.example
+.vercel
+.data
+dist
+.output
+screenshots
+artifacts
+attachments
+*.log
+tmp
+.grok
+vendor
