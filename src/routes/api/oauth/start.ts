@@ -1,8 +1,10 @@
 /**
  * OAuth start — real TanStack API route (no SPA Not Found).
- * Production (Vercel): prefers native X/Google when env is set; falls back to
- * Grok broker. Always uses relative callback paths so trustedOrigins wildcards
- * accept them.
+ *
+ * Preview (*.grok-sandbox.com): Grok broker (grok-x / grok-google).
+ * Vercel production: native Twitter/Google ONLY when env is set.
+ * Never start Grok broker on vercel.app — it always returns
+ * "Invalid redirect URI" (preview client only allows *.grok-sandbox.com).
  */
 import { createFileRoute } from "@tanstack/react-router";
 import {
@@ -22,7 +24,6 @@ function hostAllowed(hostname: string): boolean {
   ) {
     return true;
   }
-  // Vercel production / preview deployments
   if (h.endsWith(".vercel.app") || h === "vercel.app") return true;
   for (const pattern of PREVIEW_ALLOWED_HOSTS) {
     if (pattern.startsWith("*.")) {
@@ -44,6 +45,15 @@ function isLoopback(hostname: string): boolean {
     h === "127.0.0.1" ||
     h === "[::1]" ||
     h.endsWith(".localhost")
+  );
+}
+
+function isPreviewHost(hostname: string): boolean {
+  const h = hostname.toLowerCase();
+  return (
+    h.endsWith(".grok-sandbox.com") ||
+    h.endsWith(".grok.me") ||
+    isLoopback(h)
   );
 }
 
@@ -87,11 +97,10 @@ function fixRedirectUri(location: string, appOrigin: string): string {
     const ru = loc.searchParams.get("redirect_uri");
     if (!ru) return location;
     const ruUrl = new URL(ru);
-    const app = new URL(appOrigin);
     if (
-      (isLoopback(ruUrl.hostname) && !isLoopback(app.hostname)) ||
-      (!isLoopback(app.hostname) &&
-        hostAllowed(app.hostname) &&
+      (isLoopback(ruUrl.hostname) && !isLoopback(new URL(appOrigin).hostname)) ||
+      (!isLoopback(new URL(appOrigin).hostname) &&
+        hostAllowed(new URL(appOrigin).hostname) &&
         ruUrl.origin !== appOrigin)
     ) {
       loc.searchParams.set(
@@ -115,24 +124,46 @@ function safeReturnTo(raw: string | null): string {
 }
 
 /**
- * Map UI provider ids to the actual Better Auth provider:
- * - Native Twitter/Google when env is set (Vercel production)
- * - Grok broker ids otherwise (live preview)
+ * Map UI provider ids → Better Auth provider + kind.
+ * On Vercel without native keys, refuse Grok (Invalid redirect URI).
  */
-function resolveProvider(providerId: string): {
+function resolveProvider(
+  providerId: string,
+  hostname: string,
+): {
   id: string;
-  kind: "social" | "oauth2";
+  kind: "social" | "oauth2" | "blocked";
+  reason?: string;
 } {
-  const p = providerId.trim();
-  if (p === "grok-x" || p === "twitter" || p === "x") {
+  const p = providerId.trim().toLowerCase();
+  const preview = isPreviewHost(hostname);
+  const wantsX = p === "grok-x" || p === "twitter" || p === "x";
+  const wantsGoogle = p === "grok-google" || p === "google";
+
+  if (wantsX) {
     if (hasNativeTwitter) return { id: "twitter", kind: "social" };
-    return { id: "grok-x", kind: "oauth2" };
+    if (preview) return { id: "grok-x", kind: "oauth2" };
+    return {
+      id: "twitter",
+      kind: "blocked",
+      reason: "need_twitter_keys",
+    };
   }
-  if (p === "grok-google" || p === "google") {
+  if (wantsGoogle) {
     if (hasNativeGoogle) return { id: "google", kind: "social" };
-    return { id: "grok-google", kind: "oauth2" };
+    if (preview) return { id: "grok-google", kind: "oauth2" };
+    return {
+      id: "google",
+      kind: "blocked",
+      reason: "need_google_keys",
+    };
   }
-  return { id: p, kind: "oauth2" };
+  if (preview) return { id: providerId.trim(), kind: "oauth2" };
+  return {
+    id: providerId.trim(),
+    kind: "blocked",
+    reason: "provider_unavailable",
+  };
 }
 
 async function handleStart(request: Request): Promise<Response> {
@@ -140,16 +171,41 @@ async function handleStart(request: Request): Promise<Response> {
   const providerId = url.searchParams.get("providerId")?.trim();
   const appOrigin = resolveAppOrigin(request, url);
   const returnTo = safeReturnTo(url.searchParams.get("returnTo"));
+  const hostname = new URL(appOrigin).hostname;
 
   if (!providerId) {
     return new Response("Missing providerId", { status: 400 });
   }
 
+  const resolved = resolveProvider(providerId, hostname);
+
+  if (resolved.kind === "blocked") {
+    const msg =
+      resolved.reason === "need_twitter_keys"
+        ? "need_twitter_keys"
+        : resolved.reason === "need_google_keys"
+          ? "need_google_keys"
+          : "oauth_unavailable";
+    return Response.redirect(
+      `${appOrigin}/login?auth_error=${encodeURIComponent(msg)}&mail=1`,
+      302,
+    );
+  }
+
   const done = new URL(`${appOrigin}/api/oauth/done`);
   if (returnTo !== "/") done.searchParams.set("returnTo", returnTo);
-  // Relative paths are always trusted by Better Auth (allowRelativePaths)
-  const callbackURL = returnTo.startsWith("/") ? returnTo : "/";
-  const errorCallbackURL = `/login?auth_error=oauth`;
+
+  // Relative paths always pass Better Auth origin checks
+  const callbackURL =
+    resolved.kind === "social"
+      ? returnTo.startsWith("/")
+        ? returnTo
+        : "/"
+      : done.toString();
+  const errorCallbackURL =
+    resolved.kind === "social"
+      ? `/login?auth_error=oauth`
+      : `${appOrigin}/login?auth_error=oauth`;
 
   const authHeaders = new Headers(request.headers);
   try {
@@ -162,13 +218,10 @@ async function handleStart(request: Request): Promise<Response> {
     /* keep */
   }
 
-  const resolved = resolveProvider(providerId);
-
   try {
     let apiRes: Response;
 
     if (resolved.kind === "social") {
-      // Built-in Twitter / Google
       apiRes = await auth.api.signInSocial({
         body: {
           provider: resolved.id as "twitter" | "google",
@@ -179,13 +232,11 @@ async function handleStart(request: Request): Promise<Response> {
         asResponse: true,
       });
     } else {
-      // Grok broker (preview) or generic OAuth2
       apiRes = await auth.api.signInWithOAuth2({
         body: {
           providerId: resolved.id,
-          // Absolute done URL so mobile handoff lands on /api/oauth/done
-          callbackURL: done.toString(),
-          errorCallbackURL: `${appOrigin}/login?auth_error=oauth`,
+          callbackURL,
+          errorCallbackURL,
         },
         headers: authHeaders,
         asResponse: true,
@@ -203,21 +254,22 @@ async function handleStart(request: Request): Promise<Response> {
       const msg =
         apiRes.status === 429
           ? "too_many_requests"
-          : (t || "oauth_init").slice(0, 100);
+          : /invalid redirect/i.test(t)
+            ? "invalid_redirect_uri"
+            : (t || "oauth_init").slice(0, 100);
       return Response.redirect(
-        `${appOrigin}/login?auth_error=${encodeURIComponent(msg)}`,
+        `${appOrigin}/login?auth_error=${encodeURIComponent(msg)}&mail=1`,
         302,
       );
     }
 
     const body = (await apiRes.json().catch(() => null)) as {
       url?: string;
-      redirect?: boolean;
     } | null;
     let location = body?.url;
     if (!location) {
       return Response.redirect(
-        `${appOrigin}/login?auth_error=missing_url`,
+        `${appOrigin}/login?auth_error=missing_url&mail=1`,
         302,
       );
     }
@@ -235,8 +287,11 @@ async function handleStart(request: Request): Promise<Response> {
   } catch (err) {
     const raw = err instanceof Error ? err.message : "oauth_threw";
     console.error("[oauth/start] error", raw);
+    const msg = /invalid redirect/i.test(raw)
+      ? "invalid_redirect_uri"
+      : raw.slice(0, 100);
     return Response.redirect(
-      `${appOrigin}/login?auth_error=${encodeURIComponent(raw.slice(0, 100))}`,
+      `${appOrigin}/login?auth_error=${encodeURIComponent(msg)}&mail=1`,
       302,
     );
   }

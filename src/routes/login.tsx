@@ -9,8 +9,6 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
-  getBearerToken,
-  signIn,
   authClient,
   captureSessionBearer,
   finishMobileAuthReturn,
@@ -25,6 +23,17 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 
+type AuthStatus = {
+  x: { mode: string; available: boolean };
+  google: { mode: string; available: boolean };
+  durableDb: boolean;
+  setup: {
+    needDatabase: boolean;
+    needTwitterKeys: boolean;
+    twitterCallback: string | null;
+  };
+};
+
 function parseCode(raw: unknown): string | undefined {
   if (raw == null || raw === "") return undefined;
   const digits = String(raw).replace(/\D/g, "").slice(0, 6);
@@ -33,6 +42,15 @@ function parseCode(raw: unknown): string | undefined {
 
 function friendlyAuthError(raw: string, es: boolean): string {
   const s = raw.toLowerCase();
+  if (
+    /need_twitter|invalid_redirect|invalid redirect|need_google|oauth_unavailable/i.test(
+      s,
+    )
+  ) {
+    return es
+      ? "X en Vercel necesita tu propia app de X (Client ID/Secret). Mientras, entra con email."
+      : "X on Vercel needs your own X app (Client ID/Secret). For now, sign in with email.";
+  }
   if (/too_many|rate.?limit|429|too many/i.test(s)) {
     return es
       ? "Demasiados intentos. Espera ~1 minuto y prueba de nuevo."
@@ -40,13 +58,13 @@ function friendlyAuthError(raw: string, es: boolean): string {
   }
   if (/invalid origin|invalid_callback|forbidden/i.test(s)) {
     return es
-      ? "Error de configuración de login. Recarga la página e intenta otra vez."
-      : "Login config error. Reload and try again.";
+      ? "Error de configuración de login. Recarga e intenta otra vez, o usa email."
+      : "Login config error. Reload and try again, or use email.";
   }
   if (/oauth|missing_url|oauth_init|oauth_threw/i.test(s)) {
     return es
-      ? "No se pudo conectar con X/Google. Espera un momento e intenta de nuevo, o usa email."
-      : "Could not connect to X/Google. Wait a moment and try again, or use email.";
+      ? "No se pudo conectar con X/Google. Usa email mientras configuramos OAuth nativo."
+      : "Could not connect to X/Google. Use email until native OAuth is configured.";
   }
   return raw.slice(0, 160);
 }
@@ -57,6 +75,7 @@ export const Route = createFileRoute("/login")({
     auth_error?: string;
     returnTo?: string;
     code?: string;
+    mail?: string;
   } => {
     const code = parseCode(s.code);
     let authError: string | undefined;
@@ -70,6 +89,7 @@ export const Route = createFileRoute("/login")({
         ? { returnTo: s.returnTo }
         : {}),
       ...(code ? { code } : {}),
+      ...(s.mail === "1" || s.mail === 1 ? { mail: "1" } : {}),
     };
   },
   component: LoginPage,
@@ -127,9 +147,10 @@ function LoginInner() {
 
   const [mounted, setMounted] = useState(false);
   const [mobile, setMobile] = useState(false);
+  const [status, setStatus] = useState<AuthStatus | null>(null);
 
   const [mailOpen, setMailOpen] = useState(false);
-  const [mailMode, setMailMode] = useState<"in" | "up">("in");
+  const [mailMode, setMailMode] = useState<"in" | "up">("up");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busyMail, setBusyMail] = useState(false);
@@ -144,11 +165,24 @@ function LoginInner() {
   useEffect(() => {
     setMounted(true);
     setMobile(isMobileClient());
-  }, []);
+    void fetch("/api/auth/status", { credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((j: AuthStatus) => {
+        setStatus(j);
+        // Auto-open email when X is not available on this host
+        if (!j.x?.available || j.setup?.needTwitterKeys || search.mail === "1") {
+          setMailOpen(true);
+        }
+      })
+      .catch(() => {
+        /* ignore */
+      });
+  }, [search.mail]);
 
   useEffect(() => {
     if (search.auth_error) {
       setError(friendlyAuthError(search.auth_error, es));
+      setMailOpen(true);
     }
   }, [search.auth_error, es]);
 
@@ -202,10 +236,25 @@ function LoginInner() {
     return <Navigate to="/" />;
   }
 
+  const xAvailable = status?.x?.available !== false;
+  const googleAvailable = status?.google?.available !== false;
+  // While status loads, allow clicks (start route will redirect cleanly)
+  const xReady = status == null || xAvailable;
+  const googleReady = status == null || googleAvailable;
+
   const onOauth = (providerId: string) => {
     setError(null);
+    if (providerId === "grok-x" && status && !status.x.available) {
+      setError(friendlyAuthError("need_twitter_keys", es));
+      setMailOpen(true);
+      return;
+    }
+    if (providerId === "grok-google" && status && !status.google.available) {
+      setError(friendlyAuthError("need_google_keys", es));
+      setMailOpen(true);
+      return;
+    }
     setOauthBusy(providerId);
-    // Always full-page start on production + mobile (reliable cookies / no Invalid origin)
     try {
       const url = buildMobileOAuthStartUrl(providerId, search.returnTo || "/");
       window.location.assign(url);
@@ -320,11 +369,31 @@ function LoginInner() {
           </p>
         </div>
 
+        {status?.setup?.needTwitterKeys && (
+          <div className="rounded-xl border border-amber-500/35 bg-amber-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-amber-50">
+            <p className="font-semibold text-amber-100">
+              {es
+                ? "X en Vercel requiere tu app de X"
+                : "X on Vercel needs your X developer app"}
+            </p>
+            <p className="mt-1 text-amber-100/90">
+              {es
+                ? "El login vía Grok solo funciona en el preview. En producción hay que poner TWITTER_CLIENT_ID y TWITTER_CLIENT_SECRET en Vercel. Mientras tanto usa email."
+                : "Grok broker login only works in the live preview. Production needs TWITTER_CLIENT_ID + TWITTER_CLIENT_SECRET in Vercel. Use email for now."}
+            </p>
+            {status.setup.twitterCallback && (
+              <p className="mt-2 break-all font-mono text-[10px] text-amber-100/80">
+                Callback: {status.setup.twitterCallback}
+              </p>
+            )}
+          </div>
+        )}
+
         {(mobile || (mounted && isMobileClient())) && (
           <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2.5 text-[12px] leading-relaxed text-amber-100">
             {es
-              ? "Móvil / Brave: X o Google suelen abrir su propio navegador. Al terminar verás un código de 6 dígitos. Vuelve aquí → Tengo un código → pégalo."
-              : "Mobile / Brave: X often opens its own browser. When done you get a 6-digit code. Come back here, tap I have a code, and paste it."}
+              ? "Móvil / Brave: si X abre su navegador, usa el código de 6 dígitos o entra con email."
+              : "Mobile / Brave: if X opens its own browser, use the 6-digit code or sign in with email."}
           </div>
         )}
 
@@ -338,9 +407,9 @@ function LoginInner() {
           <Button
             type="button"
             variant="outline"
-            className="w-full min-h-12 gap-2 border-zinc-200 bg-zinc-100 font-semibold text-zinc-950 hover:bg-white hover:text-zinc-950"
+            className="w-full min-h-12 gap-2 border-zinc-200 bg-zinc-100 font-semibold text-zinc-950 hover:bg-white hover:text-zinc-950 disabled:opacity-60"
             onClick={() => onOauth("grok-x")}
-            disabled={!!oauthBusy}
+            disabled={!!oauthBusy || !xReady}
           >
             {oauthBusy === "grok-x" ? (
               <Loader2 className="size-4 animate-spin text-zinc-950" />
@@ -350,23 +419,35 @@ function LoginInner() {
               </span>
             )}
             <span className="text-zinc-950">
-              {es ? "Continuar con X" : "Continue with X"}
+              {!xReady
+                ? es
+                  ? "X (configurar en Vercel)"
+                  : "X (setup in Vercel)"
+                : es
+                  ? "Continuar con X"
+                  : "Continue with X"}
             </span>
           </Button>
 
           <Button
             type="button"
             variant="outline"
-            className="w-full min-h-12 gap-2 border-border bg-card font-semibold text-foreground"
+            className="w-full min-h-12 gap-2 border-border bg-card font-semibold text-foreground disabled:opacity-60"
             onClick={() => onOauth("grok-google")}
-            disabled={!!oauthBusy}
+            disabled={!!oauthBusy || !googleReady}
           >
             {oauthBusy === "grok-google" ? (
               <Loader2 className="size-4 animate-spin" />
             ) : (
               <span className="text-sm font-bold text-[#4285F4]">G</span>
             )}
-            {es ? "Continuar con Google" : "Continue with Google"}
+            {!googleReady
+              ? es
+                ? "Google (configurar en Vercel)"
+                : "Google (setup in Vercel)"
+              : es
+                ? "Continuar con Google"
+                : "Continue with Google"}
           </Button>
         </div>
 
@@ -432,7 +513,7 @@ function LoginInner() {
         >
           <span className="flex items-center gap-2 font-medium text-foreground">
             <Mail className="size-4 text-teal" />
-            {es ? "Email y contraseña" : "Email & password"}
+            {es ? "Email y contraseña (recomendado ahora)" : "Email & password (recommended now)"}
           </span>
           {mailOpen ? (
             <ChevronUp className="size-4" />
@@ -442,7 +523,7 @@ function LoginInner() {
         </button>
 
         {mailOpen && (
-          <div className="space-y-2 rounded-xl border border-border bg-card p-3">
+          <div className="space-y-2 rounded-xl border border-teal/30 bg-card p-3">
             <div className="flex gap-2 text-[11px]">
               <button
                 type="button"
@@ -501,6 +582,13 @@ function LoginInner() {
                 "Sign in"
               )}
             </Button>
+            {status?.setup?.needDatabase && (
+              <p className="text-[11px] text-amber-200/90">
+                {es
+                  ? "Aviso: sin DATABASE_URL en Vercel la sesión puede no persistir. Añade un Postgres (Neon) en variables de entorno."
+                  : "Note: without DATABASE_URL on Vercel the session may not persist. Add Postgres (Neon) env vars."}
+              </p>
+            )}
           </div>
         )}
 
