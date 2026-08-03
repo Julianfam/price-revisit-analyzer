@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@/lib/i18n";
 import {
   coerceArmedProbability,
@@ -9,10 +9,22 @@ import {
   usePriceAlerts,
   type PriceAlert,
 } from "@/lib/price-alerts";
+import {
+  applyBackup,
+  downloadBackup,
+  getLastExportAt,
+  readBackupFile,
+} from "@/lib/local-backup";
 import { formatPrice, cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { EmailSubscribe } from "@/components/email-subscribe";
 import type { AccountSyncStatus } from "@/hooks/use-account-sync";
 import {
@@ -21,11 +33,14 @@ import {
   CheckCircle2,
   Cloud,
   CloudOff,
+  Download,
   Loader2,
   RefreshCw,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
+import { toast } from "sonner";
 
 type Filter = "all" | "active" | "hit" | "stopped";
 
@@ -35,7 +50,6 @@ export type AlertsLogProps = {
   onSyncNow?: () => void;
   cloudCount?: number | null;
 };
-
 
 function ProbCell({
   alert,
@@ -56,8 +70,7 @@ function ProbCell({
       </span>
     );
   }
-  const band =
-    p >= 40 ? "high" : p >= 25 ? "mid" : "low";
+  const band = p >= 40 ? "high" : p >= 25 ? "mid" : "low";
   const color =
     band === "high"
       ? "text-bull bg-bull/15 border-bull/30"
@@ -116,7 +129,6 @@ function fill(
   return s;
 }
 
-/** Absolute pips display (always ≥ 0). */
 function formatAbsPips(pips: number, digits = 1): string {
   if (!Number.isFinite(pips)) return "—";
   const a = Math.abs(pips);
@@ -124,13 +136,8 @@ function formatAbsPips(pips: number, digits = 1): string {
   return a.toFixed(d);
 }
 
-/**
- * Pips traveled on a reached alert: |entry → hit price| (or entry→live if hit
- * price missing). Always positive; only meaningful when the alert has hit.
- */
 function reachedMovePips(alert: PriceAlert): number | null {
   if (!alert.hitAt) return null;
-  // Prefer explicit hit price; fall back to live
   const hitPx = alert.hitPrice ?? alert.livePrice;
   if (hitPx == null || !Number.isFinite(hitPx)) {
     const m = pipsSinceEntry(alert);
@@ -147,12 +154,20 @@ export function AlertsLog({
   cloudCount = null,
 }: AlertsLogProps = {}) {
   const { t, lang } = useI18n();
+  const es = lang === "es";
   const alerts = usePriceAlerts((s) => s.alerts);
   const removeAlert = usePriceAlerts((s) => s.removeAlert);
   const deactivate = usePriceAlerts((s) => s.deactivate);
   const clearHitHistory = usePriceAlerts((s) => s.clearHitHistory);
   const clearAll = usePriceAlerts((s) => s.clearAll);
   const [filter, setFilter] = useState<Filter>("all");
+  const [importing, setImporting] = useState(false);
+  const [lastExportAt, setLastExportAt] = useState<number | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    setLastExportAt(getLastExportAt());
+  }, [alerts.length]);
 
   const locale = lang === "es" ? "es" : "en";
 
@@ -163,10 +178,6 @@ export function AlertsLog({
     return { active, hit, stopped, all: alerts.length };
   }, [alerts]);
 
-  /**
-   * Σ pips = only REACHED (hit) alerts, each |entry→hit| counted positive, then summed.
-   * Active / watching alerts do NOT count until they hit.
-   */
   const pipsTotals = useMemo(() => {
     let volume = 0;
     let hitN = 0;
@@ -196,6 +207,58 @@ export function AlertsLog({
 
   const pipsUnit = t.alertPipsUnit ?? "pips";
   const volumeStr = formatAbsPips(pipsTotals.volume);
+
+  const onExport = () => {
+    try {
+      downloadBackup();
+      setLastExportAt(Date.now());
+      toast.success(
+        es
+          ? "Backup descargado · guárdalo en Drive/USB"
+          : "Backup downloaded · keep it on Drive/USB",
+      );
+    } catch {
+      toast.error(es ? "No se pudo exportar" : "Could not export");
+    }
+  };
+
+  const onPickImport = () => fileRef.current?.click();
+
+  const onFile = async (file: File | null) => {
+    if (!file) return;
+    setImporting(true);
+    try {
+      const backup = await readBackupFile(file);
+      if (backup.alerts.length === 0) {
+        toast.error(es ? "El archivo no tiene alertas" : "File has no alerts");
+        return;
+      }
+      let restoreMode: "merge" | "replace" = "replace";
+      if (alerts.length > 0) {
+        const replace = window.confirm(
+          es
+            ? `¿Reemplazar las ${alerts.length} alertas locales por las ${backup.alerts.length} del archivo?\n\nAceptar = reemplazar\nCancelar = fusionar (recomendado)`
+            : `Replace ${alerts.length} local alerts with ${backup.alerts.length} from file?\n\nOK = replace\nCancel = merge (recommended)`,
+        );
+        restoreMode = replace ? "replace" : "merge";
+      }
+      const n = applyBackup(backup, restoreMode);
+      toast.success(
+        es
+          ? `Restauradas · ${n} alertas (${restoreMode === "merge" ? "fusión" : "reemplazo"})`
+          : `Restored · ${n} alerts (${restoreMode})`,
+      );
+    } catch {
+      toast.error(
+        es
+          ? "Archivo inválido · usa un backup .json de esta app"
+          : "Invalid file · use a .json backup from this app",
+      );
+    } finally {
+      setImporting(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  };
 
   return (
     <Card className="rounded-xl overflow-hidden border-accent-soft/30">
@@ -231,7 +294,9 @@ export function AlertsLog({
                         : "border-border bg-muted/30 text-muted-fg",
                 )}
                 title={
-                  syncStatus === "synced" || syncStatus === "error" || syncStatus === "local"
+                  syncStatus === "synced" ||
+                  syncStatus === "error" ||
+                  syncStatus === "local"
                     ? (t.alertSyncNow ?? "Sync now")
                     : (t.alertSyncGuest ?? "Sign in to sync")
                 }
@@ -259,7 +324,9 @@ export function AlertsLog({
                               ? `Nube · ${cloudCount} alertas`
                               : `Cloud · ${cloudCount} alerts`
                             : (t.alertSyncCloud ?? "Cloud · PC & mobile")
-                          : (t.alertSyncGuest ?? "Local only · sign in")}
+                          : es
+                            ? "Solo este dispositivo"
+                            : "This device only"}
                 </span>
               </button>
               <Badge
@@ -290,6 +357,18 @@ export function AlertsLog({
             </div>
             <CardDescription className="mt-1.5 max-w-xl">
               {t.alertLogDesc}
+              <span className="mt-1 block text-[11px] text-muted-fg">
+                {es
+                  ? "Cerrar la web no borra alertas (quedan en el navegador). Exporta un .json si cambias de PC o limpias datos."
+                  : "Closing the tab keeps alerts (browser storage). Export a .json if you switch PCs or clear site data."}
+                {lastExportAt
+                  ? es
+                    ? ` Último backup: ${new Date(lastExportAt).toLocaleString(locale)}.`
+                    : ` Last backup: ${new Date(lastExportAt).toLocaleString(locale)}.`
+                  : es
+                    ? " Aún no has exportado un backup."
+                    : " No file backup yet."}
+              </span>
             </CardDescription>
           </div>
           <div className="flex flex-col items-stretch gap-2 sm:items-end">
@@ -297,327 +376,250 @@ export function AlertsLog({
               <Badge className="border-0 bg-accent-soft/20 text-accent-soft">
                 {counts.active} {t.alertActive}
               </Badge>
-              <Badge className="border-0 bg-bull/15 text-bull">
+              <Badge variant="outline" className="text-muted-fg">
                 {counts.hit} {t.alertHitCount}
               </Badge>
-              <Badge variant="outline" className="text-muted-fg">
-                {counts.all} {t.alertTotal}
-              </Badge>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1 text-xs"
+                onClick={onExport}
+                disabled={alerts.length === 0}
+                title={
+                  es
+                    ? "Descargar archivo .json de alertas"
+                    : "Download alerts .json file"
+                }
+              >
+                <Download className="size-3.5" />
+                {es ? "Exportar" : "Export"}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1 text-xs"
+                onClick={onPickImport}
+                disabled={importing}
+                title={
+                  es
+                    ? "Restaurar desde archivo .json"
+                    : "Restore from .json file"
+                }
+              >
+                {importing ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <Upload className="size-3.5" />
+                )}
+                {es ? "Importar" : "Import"}
+              </Button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(e) => void onFile(e.target.files?.[0] ?? null)}
+              />
             </div>
-            <div className="w-full max-w-[16.5rem] sm:w-[16.5rem]">
-              <EmailSubscribe />
+            <div className="flex flex-wrap gap-1.5 sm:justify-end">
+              {(
+                [
+                  ["all", t.alertFilterAll],
+                  ["active", t.alertFilterActive],
+                  ["hit", t.alertFilterHit],
+                  ["stopped", t.alertFilterStopped],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setFilter(key)}
+                  className={cn(
+                    "rounded-md px-2 py-1 text-[11px] font-medium transition-colors",
+                    filter === key
+                      ? "bg-teal/20 text-teal"
+                      : "text-muted-fg hover:bg-muted/40",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+              {counts.hit > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-[11px] text-muted-fg"
+                  onClick={() => clearHitHistory()}
+                >
+                  {t.alertClearHits}
+                </Button>
+              )}
+              {alerts.length > 0 && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-[11px] text-bear"
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        es
+                          ? "¿Borrar todas las alertas de este dispositivo?"
+                          : "Delete all alerts on this device?",
+                      )
+                    ) {
+                      clearAll();
+                    }
+                  }}
+                >
+                  <Trash2 className="mr-1 size-3" />
+                  {t.alertClearAll}
+                </Button>
+              )}
             </div>
           </div>
         </div>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="inline-flex rounded-md border border-border bg-card p-0.5">
-            {(
-              [
-                ["all", t.alertFilterAll],
-                ["active", t.alertFilterActive],
-                ["hit", t.alertFilterHit],
-                ["stopped", t.alertFilterStopped ?? "Stopped"],
-              ] as const
-            ).map(([key, label]) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setFilter(key)}
-                className={cn(
-                  "rounded-[5px] px-2.5 py-1 text-xs font-medium transition-colors",
-                  filter === key
-                    ? "bg-teal/20 text-teal"
-                    : "text-muted-fg hover:text-foreground",
-                )}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="text-xs text-muted-fg"
-              onClick={() => clearHitHistory()}
-              disabled={counts.hit === 0}
-            >
-              {t.alertClearHits}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="text-xs text-bear"
-              onClick={() => clearAll()}
-              disabled={counts.all === 0}
-            >
-              <Trash2 className="size-3.5" />
-              {t.alertClearAll}
-            </Button>
-          </div>
-        </div>
-
+        <EmailSubscribe />
         {rows.length === 0 ? (
-          <p className="rounded-lg border border-border bg-muted/30 px-3 py-5 text-center text-sm text-muted-fg">
-            {t.alertLogEmpty}
+          <p className="rounded-lg border border-dashed border-border px-3 py-6 text-center text-sm text-muted-fg">
+            {es
+              ? "Sin alertas. Ármalas desde Top 3 precios próximos."
+              : "No alerts yet. Arm them from Top 3 next prices."}
           </p>
         ) : (
-          <div className="overflow-x-auto rounded-lg border border-border/80">
-            <table className="w-full min-w-[900px] text-left text-sm">
-              <thead className="border-b border-border bg-surface/60 text-[11px] uppercase tracking-wide text-muted-fg">
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full min-w-[640px] text-left text-xs">
+              <thead className="bg-muted/40 text-[10px] uppercase tracking-wide text-muted-fg">
                 <tr>
-                  <th className="px-3 py-2 font-medium">{t.alertColStatus}</th>
-                  <th className="px-3 py-2 font-medium">{t.symbol}</th>
-                  <th className="px-3 py-2 font-medium">{t.alertColTarget}</th>
-                  <th className="px-3 py-2 font-medium">{t.alertColProb ?? "P%"}</th>
-                  <th className="px-3 py-2 font-medium">{t.alertColCurrent}</th>
-                  <th className="px-3 py-2 font-medium">{t.alertColEntry}</th>
-                  <th className="px-3 py-2 font-medium">{t.alertColPips}</th>
-                  <th className="px-3 py-2 font-medium">{t.alertColCreated}</th>
-                  <th className="px-3 py-2 font-medium">{t.alertColHit}</th>
-                  <th className="px-3 py-2 font-medium text-right">{t.alertColActions}</th>
+                  <th className="px-2 py-2 font-medium">
+                    {es ? "Símbolo" : "Symbol"}
+                  </th>
+                  <th className="px-2 py-2 font-medium">
+                    {t.alertColTarget}
+                  </th>
+                  <th className="px-2 py-2 font-medium">
+                    {t.alertColProb}
+                  </th>
+                  <th className="px-2 py-2 font-medium">
+                    {t.alertColStatus}
+                  </th>
+                  <th className="px-2 py-2 font-medium">
+                    {t.alertColPips}
+                  </th>
+                  <th className="px-2 py-2 font-medium">
+                    {t.alertColCreated}
+                  </th>
+                  <th className="px-2 py-2 font-medium" />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((a) => (
-                  <AlertTableRow
-                    key={a.id}
-                    alert={a}
-                    locale={locale}
-                    t={t}
-                    onStop={() => deactivate(a.id)}
-                    onRemove={() => removeAlert(a.id)}
-                  />
-                ))}
+                {rows.map((a) => {
+                  const move = reachedMovePips(a);
+                  const toGo =
+                    a.active && a.livePrice != null
+                      ? pipsToTarget(a, a.livePrice)
+                      : null;
+                  const sinceEntry =
+                    a.livePrice != null ? pipsSinceEntry(a, a.livePrice) : null;
+                  return (
+                    <tr
+                      key={a.id}
+                      className="border-t border-border/80 hover:bg-muted/20"
+                    >
+                      <td className="px-2 py-2 font-semibold">{a.symbol}</td>
+                      <td className="px-2 py-2 font-mono tabular">
+                        {formatPrice(a.targetPrice, a.tick)}
+                        {a.livePrice != null && (
+                          <span className="mt-0.5 block text-[10px] text-muted-fg">
+                            now {formatPrice(a.livePrice, a.tick)}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2">
+                        <ProbCell alert={a} t={t} />
+                      </td>
+                      <td className="px-2 py-2">
+                        {a.hitAt ? (
+                          <span className="inline-flex items-center gap-1 text-bull">
+                            <CheckCircle2 className="size-3.5" />
+                            {t.alertHitLabel}
+                          </span>
+                        ) : a.active ? (
+                          <span className="inline-flex items-center gap-1 text-teal">
+                            <BellRing className="size-3.5" />
+                            {t.alertActive}
+                          </span>
+                        ) : (
+                          <span className="text-muted-fg">
+                            {t.alertStopped}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 font-mono tabular">
+                        {a.hitAt && move != null
+                          ? `+${formatAbsPips(move)}`
+                          : sinceEntry != null
+                            ? formatSignedPips(sinceEntry)
+                            : toGo != null
+                              ? `${formatAbsPips(toGo)} left`
+                              : "—"}
+                      </td>
+                      <td className="px-2 py-2 text-muted-fg">
+                        {a.hitAt ? (
+                          <>
+                            {new Date(a.hitAt).toLocaleString(locale, {
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })}
+                            <span className="mt-0.5 block text-[10px]">
+                              {formatDuration(a.hitAt - a.createdAt)}
+                            </span>
+                          </>
+                        ) : (
+                          new Date(a.createdAt).toLocaleString(locale, {
+                            month: "short",
+                            day: "numeric",
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })
+                        )}
+                      </td>
+                      <td className="px-2 py-2 text-right">
+                        {a.active ? (
+                          <button
+                            type="button"
+                            className="rounded p-1 text-muted-fg hover:bg-muted hover:text-foreground"
+                            onClick={() => deactivate(a.id)}
+                            title={t.alertDisarm}
+                          >
+                            <X className="size-3.5" />
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rounded p-1 text-muted-fg hover:bg-bear/15 hover:text-bear"
+                            onClick={() => removeAlert(a.id)}
+                            title={t.alertRemove}
+                          >
+                            <Trash2 className="size-3.5" />
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </CardContent>
     </Card>
-  );
-}
-
-function AlertTableRow({
-  alert,
-  locale,
-  t,
-  onStop,
-  onRemove,
-}: {
-  alert: PriceAlert;
-  locale: string;
-  t: ReturnType<typeof useI18n>["t"];
-  onStop: () => void;
-  onRemove: () => void;
-}) {
-  const status = alert.active
-    ? "active"
-    : alert.hitAt
-      ? "hit"
-      : alert.abandonedAt
-        ? "abandoned"
-        : "stopped";
-  const moved = pipsSinceEntry(alert);
-  const remaining = alert.active ? pipsToTarget(alert) : null;
-  const reached = reachedMovePips(alert);
-  const movedStr = formatSignedPips(moved);
-  const movedColor =
-    moved == null
-      ? "text-muted-fg"
-      : moved > 0
-        ? "text-bull"
-        : moved < 0
-          ? "text-bear"
-          : "text-muted-fg";
-
-  const entry =
-    alert.entryPrice != null && Number.isFinite(alert.entryPrice)
-      ? alert.entryPrice
-      : null;
-
-  const current = alert.active
-    ? (alert.livePrice ?? entry)
-    : (alert.hitPrice ?? alert.livePrice ?? null);
-
-  const vsTarget = current != null ? current - alert.targetPrice : null;
-  const vsTargetColor =
-    vsTarget == null
-      ? "text-muted-fg"
-      : Math.abs(vsTarget) <= (alert.tick || 0) * 0.5
-        ? "text-bull"
-        : vsTarget < 0
-          ? "text-bear"
-          : "text-bull";
-
-  const timeToHitMs =
-    alert.hitAt != null && alert.createdAt != null
-      ? Math.max(0, alert.hitAt - alert.createdAt)
-      : null;
-
-  return (
-    <tr className="border-b border-border/60 last:border-0 hover:bg-muted/20">
-      <td className="px-3 py-2.5">
-        {status === "active" && (
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-accent-soft">
-            <BellRing className="size-3.5" />
-            {t.alertWatching}
-          </span>
-        )}
-        {status === "hit" && (
-          <span className="inline-flex items-center gap-1 text-xs font-medium text-bull">
-            <CheckCircle2 className="size-3.5" />
-            {t.alertHitLabel}
-          </span>
-        )}
-        {status === "abandoned" && (
-          <span className="inline-flex flex-col gap-0.5 text-xs font-medium text-rank1">
-            <span>
-              {alert.abandonReason === "expired"
-                ? (t.alertAbandonExpired ?? "Expired")
-                : (t.alertAbandoned ?? "Stopped")}
-            </span>
-            <span className="font-normal text-muted-fg">
-              {alert.abandonReason === "expired"
-                ? "TTL 7d · no hit"
-                : alert.abandonReason === "too_far" ||
-                    alert.abandonReason === "away_timeout"
-                  ? "legacy"
-                  : ""}
-            </span>
-          </span>
-        )}
-        {status === "stopped" && (
-          <span className="text-xs text-muted-fg">{t.alertStopped}</span>
-        )}
-      </td>
-      <td className="px-3 py-2.5">
-        <span className="font-mono text-xs font-semibold text-foreground">
-          {alert.symbol}
-        </span>
-        <span className="mt-0.5 block text-[10px] text-muted-fg">
-          {alert.yahooSymbol}
-        </span>
-      </td>
-      <td className="px-3 py-2.5 font-mono tabular text-foreground">
-        {formatPrice(alert.targetPrice, alert.tick)}
-      </td>
-      <td className="px-3 py-2.5">
-        <ProbCell alert={alert} t={t} />
-      </td>
-      <td className="px-3 py-2.5">
-        {current != null ? (
-          <div>
-            <span className={cn("font-mono text-sm font-semibold tabular", vsTargetColor)}>
-              {formatPrice(current, alert.tick)}
-            </span>
-            {alert.active && (
-              <span className="mt-0.5 block text-[10px] text-accent-soft">
-                {t.alertLive}
-                {alert.liveAt
-                  ? ` · ${new Date(alert.liveAt).toLocaleTimeString(locale, {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      second: "2-digit",
-                    })}`
-                  : ""}
-              </span>
-            )}
-            {!alert.active && alert.hitAt && (
-              <span className="mt-0.5 block text-[10px] text-muted-fg">
-                {t.alertHitLabel}
-              </span>
-            )}
-            {vsTarget != null && alert.active && (
-              <span className="mt-0.5 block font-mono text-[10px] tabular text-muted-fg">
-                Δ obj {formatPrice(vsTarget, alert.tick)}
-              </span>
-            )}
-          </div>
-        ) : (
-          <span className="text-muted-fg">—</span>
-        )}
-      </td>
-      <td className="px-3 py-2.5 font-mono tabular text-muted-fg">
-        {entry != null ? formatPrice(entry, alert.tick) : "—"}
-      </td>
-      <td className="px-3 py-2.5">
-        <span className={cn("font-mono text-sm font-semibold tabular", movedColor)}>
-          {movedStr}
-          <span className="ml-0.5 text-[10px] font-normal text-muted-fg">
-            {t.alertPipsUnit}
-          </span>
-        </span>
-        {reached != null && (
-          <span className="mt-0.5 block font-mono text-[10px] tabular text-bull">
-            +{formatAbsPips(reached)} {t.alertPipsUnit} Σ
-          </span>
-        )}
-        {remaining != null && alert.active && (
-          <span className="mt-0.5 block text-[10px] tabular text-muted-fg">
-            {t.alertPipsLeft} {formatSignedPips(remaining)}
-          </span>
-        )}
-      </td>
-      <td className="px-3 py-2.5 text-xs tabular text-muted-fg">
-        {new Date(alert.createdAt).toLocaleString(locale, {
-          dateStyle: "short",
-          timeStyle: "short",
-        })}
-      </td>
-      <td className="px-3 py-2.5 text-xs tabular">
-        {alert.hitAt ? (
-          <div>
-            <span className="font-medium text-bull">
-              {new Date(alert.hitAt).toLocaleString(locale, {
-                dateStyle: "medium",
-                timeStyle: "medium",
-              })}
-            </span>
-            {timeToHitMs != null && (
-              <span className="mt-0.5 block font-semibold tabular text-accent-soft">
-                {t.alertTimeToHit} {formatDuration(timeToHitMs)}
-              </span>
-            )}
-            {alert.hitPrice != null && (
-              <span className="mt-0.5 block font-mono text-[10px] text-muted-fg">
-                @ {formatPrice(alert.hitPrice, alert.tick)}
-              </span>
-            )}
-          </div>
-        ) : (
-          <span className="text-muted-fg">—</span>
-        )}
-      </td>
-      <td className="px-3 py-2.5 text-right">
-        <div className="inline-flex gap-1">
-          {alert.active && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-8 px-2 text-xs text-muted-fg"
-              onClick={onStop}
-            >
-              {t.alertDisarm}
-            </Button>
-          )}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-8 px-2 text-xs text-bear"
-            onClick={onRemove}
-            aria-label={t.alertRemove}
-          >
-            <X className="size-3.5" />
-          </Button>
-        </div>
-      </td>
-    </tr>
   );
 }

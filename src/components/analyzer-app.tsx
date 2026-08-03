@@ -37,6 +37,7 @@ import { ParametersTutorial } from "@/components/parameters-tutorial";
 import { ProToolsBar } from "@/components/pro-tools";
 import type { QuantumCandidate } from "@/lib/analyzer/quantum";
 import { usePriceAlerts } from "@/lib/price-alerts";
+import { recoverAlertsIfEmpty, mirrorToIdb } from "@/lib/local-backup";
 import { HelpLabel } from "@/components/help-label";
 import { MetricsGrid } from "@/components/metrics-grid";
 import { PriceChart } from "@/components/price-chart";
@@ -115,6 +116,29 @@ export function AnalyzerApp() {
   const plan = usePlan();
   const [upgradeOpen, setUpgradeOpen] = useState(false);
   const [minProb, setMinProb] = useState(0);
+
+  // Recover alerts from IndexedDB if localStorage was wiped
+  useEffect(() => {
+    void recoverAlertsIfEmpty().then((ok) => {
+      if (ok) {
+        toast.success(
+          lang === "es"
+            ? "Alertas recuperadas del respaldo local del navegador"
+            : "Alerts recovered from browser local backup",
+        );
+      }
+    });
+  }, [lang]);
+
+  // Keep IndexedDB mirror fresh (survives some mobile “clear cookies” quirks)
+  const alertCount = usePriceAlerts((s) => s.alerts.length);
+  useEffect(() => {
+    if (alertCount === 0) return;
+    const tmr = window.setTimeout(() => {
+      void mirrorToIdb().catch(() => {});
+    }, 800);
+    return () => window.clearTimeout(tmr);
+  }, [alertCount]);
 
   /** Never trap premium/god users in the paywall sheet */
   const openUpgrade = useCallback(() => {
