@@ -10,11 +10,7 @@ import {
   Zap,
 } from "lucide-react";
 import { toast } from "sonner";
-import {
-  getQuantumStatus,
-  runQuantumAgent,
-  startQuantumAgent,
-} from "@/lib/analyzer/server";
+import { runQuantumAgent } from "@/lib/analyzer/server";
 import {
   QUANTUM_UNIVERSE_DEFAULT,
   type QuantumCandidate,
@@ -43,7 +39,9 @@ const PROB_OPTS = [0, 40, 50, 60, 70] as const;
 const PIPS_OPTS = [0, 5, 10, 20, 50] as const;
 
 /**
- * Quantum Agent — Pro multi-parameter explorer with live progress + filters.
+ * Quantum Agent — single request (no job polling).
+ * Serverless hosts (Vercel / grok.me) cannot share in-memory job state
+ * across requests; sandbox long-lived Node could, but we use one path everywhere.
  */
 export function QuantumAgentPanel({
   enabled,
@@ -64,16 +62,16 @@ export function QuantumAgentPanel({
   const [minProb, setMinProb] = useState(0);
   const [minPips, setMinPips] = useState(0);
   const [progress, setProgress] = useState<ProgressView | null>(null);
-  const pollRef = useRef<number | null>(null);
+  const tickRef = useRef<number | null>(null);
 
-  const stopPoll = useCallback(() => {
-    if (pollRef.current != null) {
-      window.clearInterval(pollRef.current);
-      pollRef.current = null;
+  const stopTick = useCallback(() => {
+    if (tickRef.current != null) {
+      window.clearInterval(tickRef.current);
+      tickRef.current = null;
     }
   }, []);
 
-  useEffect(() => () => stopPoll(), [stopPoll]);
+  useEffect(() => () => stopTick(), [stopTick]);
 
   const run = useCallback(async () => {
     if (!enabled) {
@@ -83,33 +81,93 @@ export function QuantumAgentPanel({
     setLoading(true);
     setError(null);
     setProgress({
-      pct: 4,
+      pct: 5,
       label: es ? "Fase 1 · escaneo amplio" : "Phase 1 · wide scan",
-      detail: es ? "Consultando mercado…" : "Fetching market…",
+      detail: es ? "Una sola petición (sin jobs)…" : "Single request (no jobs)…",
       phase: 1,
     });
-    stopPoll();
+    stopTick();
 
-    // Client-side progress while the single serverless request runs
     const phases: ProgressView[] = es
       ? [
-          { pct: 12, label: "Fase 1 · escaneo amplio", detail: "Barrido multi-activo…", phase: 1 },
-          { pct: 28, label: "Fase 1 · escaneo amplio", detail: "Combos de ventana…", phase: 1 },
-          { pct: 45, label: "Fase 2 · refine", detail: "Top activos…", phase: 2 },
-          { pct: 62, label: "Fase 2 · refine", detail: "Más profundidad…", phase: 2 },
-          { pct: 78, label: "Consenso", detail: "Acuerdo multi-ventana…", phase: 3 },
-          { pct: 90, label: "Ranking", detail: "Top 12 (máx. 2/activo)…", phase: 3 },
+          {
+            pct: 15,
+            label: "Fase 1 · escaneo amplio",
+            detail: "Barrido multi-activo…",
+            phase: 1,
+          },
+          {
+            pct: 32,
+            label: "Fase 1 · escaneo amplio",
+            detail: "Combos de ventana…",
+            phase: 1,
+          },
+          {
+            pct: 48,
+            label: "Fase 2 · refine",
+            detail: "Top activos…",
+            phase: 2,
+          },
+          {
+            pct: 65,
+            label: "Fase 2 · refine",
+            detail: "Más profundidad…",
+            phase: 2,
+          },
+          {
+            pct: 80,
+            label: "Consenso",
+            detail: "Acuerdo multi-ventana…",
+            phase: 3,
+          },
+          {
+            pct: 92,
+            label: "Ranking",
+            detail: "Top 12 (máx. 2/activo)…",
+            phase: 3,
+          },
         ]
       : [
-          { pct: 12, label: "Phase 1 · wide scan", detail: "Multi-asset sweep…", phase: 1 },
-          { pct: 28, label: "Phase 1 · wide scan", detail: "Window combos…", phase: 1 },
-          { pct: 45, label: "Phase 2 · refine", detail: "Top assets…", phase: 2 },
-          { pct: 62, label: "Phase 2 · refine", detail: "Deeper passes…", phase: 2 },
-          { pct: 78, label: "Consensus", detail: "Multi-window agree…", phase: 3 },
-          { pct: 90, label: "Ranking", detail: "Top 12 (max 2/asset)…", phase: 3 },
+          {
+            pct: 15,
+            label: "Phase 1 · wide scan",
+            detail: "Multi-asset sweep…",
+            phase: 1,
+          },
+          {
+            pct: 32,
+            label: "Phase 1 · wide scan",
+            detail: "Window combos…",
+            phase: 1,
+          },
+          {
+            pct: 48,
+            label: "Phase 2 · refine",
+            detail: "Top assets…",
+            phase: 2,
+          },
+          {
+            pct: 65,
+            label: "Phase 2 · refine",
+            detail: "Deeper passes…",
+            phase: 2,
+          },
+          {
+            pct: 80,
+            label: "Consensus",
+            detail: "Multi-window agree…",
+            phase: 3,
+          },
+          {
+            pct: 92,
+            label: "Ranking",
+            detail: "Top 12 (max 2/asset)…",
+            phase: 3,
+          },
         ];
+
     let step = 0;
-    pollRef.current = window.setInterval(() => {
+    tickRef.current = window.setInterval(() => {
       if (step < phases.length) {
         setProgress(phases[step]!);
         step += 1;
@@ -118,184 +176,92 @@ export function QuantumAgentPanel({
           p
             ? {
                 ...p,
-                pct: Math.min(96, p.pct + 1),
+                pct: Math.min(97, p.pct + 1),
                 detail: es ? "Casi listo…" : "Almost done…",
               }
             : p,
         );
       }
-    }, 1800);
+    }, 1600);
 
     try {
-      const start = (await startQuantumAgent({
+      // ONE request. Never start+poll — that breaks on grok.me / Vercel.
+      const raw = await runQuantumAgent({
         data: {
           assetCount: 7,
           minProb,
           minPips,
         },
-      })) as {
-        jobId: string;
-        total: number;
-        status?: "done" | "error";
-        result?: QuantumRunResult;
-        error?: string;
-      };
-
-      stopPoll();
-
-      if (start.status === "error" || start.error) {
-        throw new Error(start.error || "Quantum failed");
-      }
-
-      // Preferred path: full result in the same response (Vercel-safe)
-      if (start.result) {
-        setProgress({
-          pct: 100,
-          label: es ? "Listo" : "Done",
-          detail: `${start.result.topPrices.length} targets`,
-          phase: 3,
-        });
-        setResult(start.result);
-        const n = start.result.topPrices.length;
-        if (n === 0) {
-          toast.message(
-            es
-              ? "Sin targets con esos filtros — baja P% o pips"
-              : "No targets with those filters — lower P% or pips",
-          );
-        } else {
-          toast.success(
-            es ? `Quantum · ${n} resultados` : `Quantum · ${n} results`,
-          );
-        }
-        return;
-      }
-
-      // Legacy poll path (long-lived Node with in-memory jobs)
-      const jobId = start.jobId;
-      await new Promise<void>((resolve, reject) => {
-        let tries = 0;
-        pollRef.current = window.setInterval(() => {
-          void (async () => {
-            tries += 1;
-            try {
-              const st = (await getQuantumStatus({
-                data: { jobId },
-              })) as
-                | {
-                    missing?: boolean;
-                    status?: string;
-                    pct?: number;
-                    label?: string;
-                    detail?: string;
-                    phase?: number;
-                    result?: QuantumRunResult;
-                    error?: string;
-                  }
-                | { missing: true };
-
-              if ("missing" in st && st.missing) {
-                // Serverless lost the job — fall back to full sync run once
-                if (tries === 1 || tries === 3) {
-                  return;
-                }
-                if (tries >= 4) {
-                  stopPoll();
-                  try {
-                    const full = (await runQuantumAgent({
-                      data: { assetCount: 7, minProb, minPips },
-                    })) as QuantumRunResult;
-                    setResult(full);
-                    toast.success(
-                      es
-                        ? `Quantum · ${full.topPrices.length} resultados`
-                        : `Quantum · ${full.topPrices.length} results`,
-                    );
-                    resolve();
-                  } catch (err) {
-                    reject(
-                      err instanceof Error
-                        ? err
-                        : new Error(es ? "Job no encontrado" : "Job not found"),
-                    );
-                  }
-                }
-                return;
-              }
-
-              const job = st as {
-                status?: string;
-                pct?: number;
-                label?: string;
-                detail?: string;
-                phase?: number;
-                result?: QuantumRunResult;
-                error?: string;
-              };
-
-              setProgress({
-                pct: job.pct ?? 0,
-                label: job.label ?? "…",
-                detail: job.detail ?? "",
-                phase: job.phase ?? 0,
-              });
-
-              if (job.status === "done" && job.result) {
-                stopPoll();
-                setResult(job.result);
-                const n = job.result.topPrices.length;
-                if (n === 0) {
-                  toast.message(
-                    es
-                      ? "Sin targets con esos filtros — baja P% o pips"
-                      : "No targets with those filters — lower P% or pips",
-                  );
-                } else {
-                  toast.success(
-                    es
-                      ? `Quantum · ${n} resultados`
-                      : `Quantum · ${n} results`,
-                  );
-                }
-                resolve();
-              } else if (job.status === "error") {
-                stopPoll();
-                reject(new Error(job.error || "Quantum failed"));
-              } else if (tries > 400) {
-                stopPoll();
-                reject(new Error(es ? "Timeout Quantum" : "Quantum timeout"));
-              }
-            } catch (e) {
-              if (tries > 15) {
-                stopPoll();
-                reject(e instanceof Error ? e : new Error(String(e)));
-              }
-            }
-          })();
-        }, 450);
       });
+
+      // TanStack may return the payload directly or nested
+      const full = (raw && typeof raw === "object" && "topPrices" in (raw as object)
+        ? raw
+        : (raw as { result?: QuantumRunResult })?.result) as QuantumRunResult | undefined;
+
+      if (!full || !Array.isArray(full.topPrices)) {
+        throw new Error(
+          es
+            ? "Respuesta Quantum inválida del servidor. Recarga e intenta de nuevo."
+            : "Invalid Quantum response from server. Reload and try again.",
+        );
+      }
+
+      setProgress({
+        pct: 100,
+        label: es ? "Listo" : "Done",
+        detail: `${full.topPrices.length} targets`,
+        phase: 3,
+      });
+      setResult(full);
+      const n = full.topPrices.length;
+      if (n === 0) {
+        toast.message(
+          es
+            ? "Sin targets con esos filtros — baja P% o pips"
+            : "No targets with those filters — lower P% or pips",
+        );
+      } else {
+        toast.success(
+          es ? `Quantum · ${n} resultados` : `Quantum · ${n} results`,
+        );
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("PREMIUM")) {
+      const lower = msg.toLowerCase();
+      if (msg.includes("PREMIUM") || lower.includes("premium")) {
         setError(
           es
             ? "Quantum Agent es Trial/Pro"
             : "Quantum Agent requires Trial/Pro",
         );
         onNeedUpgrade?.();
+      } else if (
+        lower.includes("timeout") ||
+        lower.includes("504") ||
+        lower.includes("abort") ||
+        lower.includes("failed to fetch") ||
+        lower.includes("network")
+      ) {
+        const friendly = es
+          ? "La búsqueda tardó demasiado en el servidor (límite cloud). Baja filtros o reintenta."
+          : "Quantum timed out on the cloud host. Lower filters or retry.";
+        setError(friendly);
+        toast.error(es ? "Timeout Quantum" : "Quantum timeout", {
+          description: friendly,
+        });
       } else {
         setError(msg);
         toast.error(es ? "Quantum falló" : "Quantum failed", {
-          description: msg.slice(0, 160),
+          description: msg.slice(0, 180),
         });
       }
     } finally {
-      stopPoll();
+      stopTick();
       setLoading(false);
-      // keep last progress briefly then clear via next paint
-      window.setTimeout(() => setProgress(null), 600);
+      window.setTimeout(() => setProgress(null), 700);
     }
-  }, [enabled, es, minProb, minPips, onNeedUpgrade, stopPoll]);
+  }, [enabled, es, minProb, minPips, onNeedUpgrade, stopTick]);
 
   if (!enabled) {
     return (
@@ -317,8 +283,8 @@ export function QuantumAgentPanel({
             </span>
             <span className="mt-0.5 block text-[11px] text-muted-fg">
               {es
-                ? "Progreso en vivo · filtros P%/pips · Top 12 (máx. 2/activo)"
-                : "Live progress · P%/pips filters · Top 12 (max 2/asset)"}
+                ? "Escaneo multi-activo · Top 12 (máx. 2/activo)"
+                : "Multi-asset scan · Top 12 (max 2/asset)"}
             </span>
           </span>
         </span>
@@ -347,8 +313,8 @@ export function QuantumAgentPanel({
             </p>
             <p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted-fg">
               {es
-                ? "Bucle multi-fase con progreso en vivo. Filtra por P% y pips mínimos. Especulativo."
-                : "Multi-phase loop with live progress. Filter by min P% and pips. Speculative."}
+                ? "Bucle multi-fase en una sola petición (compatible cloud). Filtra por P% y pips. Especulativo."
+                : "Multi-phase loop in one request (cloud-safe). Filter by min P% and pips. Speculative."}
             </p>
           </div>
           <Button
@@ -356,16 +322,16 @@ export function QuantumAgentPanel({
             size="sm"
             disabled={loading}
             onClick={() => void run()}
-            className="h-9 gap-1.5 bg-rank1 text-zinc-950 hover:bg-rank1/90"
+            className="shrink-0 gap-1.5 bg-rank1 text-black hover:bg-rank1/90"
           >
             {loading ? (
               <Loader2 className="size-3.5 animate-spin" />
             ) : (
-              <Zap className="size-3.5" />
+              <Sparkles className="size-3.5" />
             )}
             {loading
               ? es
-                ? "Explorando…"
+                ? "Buscando…"
                 : "Scanning…"
               : es
                 ? "Ejecutar Quantum"
@@ -374,152 +340,110 @@ export function QuantumAgentPanel({
         </div>
 
         {/* Filters */}
-        <div className="grid gap-2 sm:grid-cols-2">
-          <div>
-            <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-fg">
-              {es ? "P% mínima" : "Min P%"}
-            </p>
-            <div className="flex flex-wrap gap-1">
-              {PROB_OPTS.map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  disabled={loading}
-                  onClick={() => setMinProb(v)}
-                  className={cn(
-                    "rounded-md border px-2 py-1 font-mono text-[11px] tabular transition-colors",
-                    minProb === v
-                      ? "border-rank1/50 bg-rank1/20 text-rank1"
-                      : "border-border bg-card text-muted-fg hover:text-foreground",
-                  )}
-                >
-                  {v === 0 ? (es ? "Todas" : "All") : `≥${v}%`}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-fg">
-              {es ? "Pips mínimos" : "Min pips"}
-            </p>
-            <div className="flex flex-wrap gap-1">
-              {PIPS_OPTS.map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  disabled={loading}
-                  onClick={() => setMinPips(v)}
-                  className={cn(
-                    "rounded-md border px-2 py-1 font-mono text-[11px] tabular transition-colors",
-                    minPips === v
-                      ? "border-teal/50 bg-teal/15 text-teal"
-                      : "border-border bg-card text-muted-fg hover:text-foreground",
-                  )}
-                >
-                  {v === 0 ? (es ? "Todos" : "All") : `≥${v}`}
-                </button>
-              ))}
-            </div>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-1.5">
-          {QUANTUM_UNIVERSE_DEFAULT.map((s) => (
-            <span
-              key={s}
-              className="rounded-md border border-border/80 bg-muted/40 px-2 py-0.5 font-mono text-[10px] text-muted-fg"
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[10px] font-medium uppercase tracking-wide text-muted-fg">
+            min P%
+          </span>
+          {PROB_OPTS.map((v) => (
+            <button
+              key={v}
+              type="button"
+              disabled={loading}
+              onClick={() => setMinProb(v)}
+              className={cn(
+                "rounded-md px-2 py-0.5 text-[11px] font-semibold tabular transition-colors",
+                minProb === v
+                  ? "bg-rank1/25 text-rank1"
+                  : "bg-muted/40 text-muted-fg hover:bg-muted",
+              )}
             >
-              {s}
-            </span>
+              {v === 0 ? (es ? "todos" : "any") : `${v}+`}
+            </button>
+          ))}
+          <span className="ml-1 text-[10px] font-medium uppercase tracking-wide text-muted-fg">
+            min pips
+          </span>
+          {PIPS_OPTS.map((v) => (
+            <button
+              key={v}
+              type="button"
+              disabled={loading}
+              onClick={() => setMinPips(v)}
+              className={cn(
+                "rounded-md px-2 py-0.5 text-[11px] font-semibold tabular transition-colors",
+                minPips === v
+                  ? "bg-teal/25 text-teal"
+                  : "bg-muted/40 text-muted-fg hover:bg-muted",
+              )}
+            >
+              {v === 0 ? (es ? "todos" : "any") : `${v}+`}
+            </button>
           ))}
         </div>
 
+        {progress && (
+          <div className="space-y-1.5 rounded-lg border border-rank1/25 bg-rank1/5 px-3 py-2">
+            <div className="flex items-center justify-between gap-2 text-[11px]">
+              <span className="font-medium text-foreground">
+                {progress.label}
+              </span>
+              <span className="font-mono tabular text-rank1">
+                {progress.pct}%
+              </span>
+            </div>
+            <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full bg-gradient-to-r from-rank1 to-teal transition-all duration-500"
+                style={{ width: `${progress.pct}%` }}
+              />
+            </div>
+            <p className="text-[10px] text-muted-fg">{progress.detail}</p>
+          </div>
+        )}
+
         {error && (
-          <p className="rounded-lg border border-bear/30 bg-bear/10 px-2.5 py-1.5 text-[11px] text-bear">
+          <p className="rounded-lg border border-bear/30 bg-bear/10 px-3 py-2 text-xs text-bear">
             {error}
           </p>
         )}
 
-        {loading && progress && (
-          <div className="space-y-2 rounded-lg border border-border bg-muted/20 px-3 py-3">
-            <div className="flex items-center justify-between gap-2 text-[11px]">
-              <span className="flex items-center gap-1.5 font-medium text-foreground">
-                <Loader2 className="size-3.5 animate-spin text-rank1" />
-                {progress.label}
-                <span className="text-muted-fg">· P{progress.phase || 1}</span>
+        {result && !loading && (
+          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-fg">
+            <Zap className="size-3 text-rank1" />
+            <span>
+              {result.scanned} scans · {result.candidates} seeds ·{" "}
+              {(result.tookMs / 1000).toFixed(1)}s
+            </span>
+            {result.universe?.length > 0 && (
+              <span className="truncate">
+                · {result.universe.slice(0, 8).join(", ")}
               </span>
-              <span className="font-mono tabular text-muted-fg">
-                {progress.pct}%
-              </span>
-            </div>
-            <div className="h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full bg-gradient-to-r from-rank1 via-teal to-accent-soft transition-all duration-300"
-                style={{ width: `${Math.max(3, progress.pct)}%` }}
-              />
-            </div>
-            <p className="truncate font-mono text-[10px] text-muted-fg">
-              {progress.detail}
-            </p>
+            )}
+            {!result.universe?.includes(QUANTUM_UNIVERSE_DEFAULT[0]!) && null}
           </div>
         )}
 
-        {result && !loading && (
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-muted-fg">
-              <span className="flex items-center gap-1">
-                <Sparkles className="size-3 text-rank1" />
-                {es
-                  ? `Top ${shown.length} · filtros P%≥${minProb || 0} · pips≥${minPips || 0}`
-                  : `Top ${shown.length} · filters P%≥${minProb || 0} · pips≥${minPips || 0}`}
-              </span>
-              <span className="font-mono tabular">
-                {result.scanned} scans · {(result.tookMs / 1000).toFixed(1)}s
-                {result.loop
-                  ? ` · P1 ${result.loop.phase1Scans}/P2 ${result.loop.phase2Scans}`
-                  : ""}
-              </span>
-            </div>
-
-            {shown.length === 0 ? (
-              <p className="text-[11px] text-muted-fg">
-                {es
-                  ? "Sin candidatos con esos filtros. Baja P% o pips y vuelve a ejecutar."
-                  : "No candidates with those filters. Lower P% or pips and re-run."}
-              </p>
-            ) : (
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {shown.map((c, i) => (
-                  <QuantumCard
-                    key={c.id}
-                    rank={i + 1}
-                    c={c}
-                    es={es}
-                    onApply={() =>
-                      onApply({
-                        symbol: c.symbol,
-                        interval: c.interval,
-                        range: c.range,
-                        window: c.window,
-                      })
-                    }
-                    onArm={onArmAlert ? () => onArmAlert(c) : undefined}
-                  />
-                ))}
-              </div>
-            )}
-
-            {result.errors.length > 0 && (
-              <p className="text-[10px] text-muted-fg">
-                {es ? "Avisos" : "Notes"}:{" "}
-                {result.errors
-                  .slice(0, 3)
-                  .map((e) => e.symbol)
-                  .join(", ")}
-                {result.errors.length > 3 ? "…" : ""}
-              </p>
-            )}
+        {shown.length > 0 && (
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {shown.map((c, i) => (
+              <QuantumCard
+                key={`${c.symbol}-${c.targetPrice}-${i}`}
+                c={c}
+                rank={i + 1}
+                es={es}
+                onApply={onApply}
+                onArmAlert={onArmAlert}
+              />
+            ))}
           </div>
+        )}
+
+        {result && shown.length === 0 && !loading && (
+          <p className="text-center text-xs text-muted-fg">
+            {es
+              ? "Sin resultados con esos filtros."
+              : "No results with those filters."}
+          </p>
         )}
       </div>
     </div>
@@ -527,109 +451,79 @@ export function QuantumAgentPanel({
 }
 
 function QuantumCard({
-  rank,
   c,
+  rank,
   es,
   onApply,
-  onArm,
+  onArmAlert,
 }: {
-  rank: number;
   c: QuantumCandidate;
+  rank: number;
   es: boolean;
-  onApply: () => void;
-  onArm?: () => void;
+  onApply: (p: QuantumApplyParams) => void;
+  onArmAlert?: (cand: QuantumCandidate) => void;
 }) {
-  const Dir = c.direction === "up" ? TrendingUp : TrendingDown;
-  const dirColor = c.direction === "up" ? "text-bull" : "text-bear";
-  const rankStyle =
-    rank === 1
-      ? "border-rank1/50 bg-rank1/10"
-      : rank === 2
-        ? "border-accent-soft/40 bg-accent-soft/10"
-        : "border-border bg-muted/20";
-
+  const up = c.direction === "up";
   return (
-    <div
-      className={cn(
-        "flex flex-col rounded-lg border p-2.5 shadow-sm",
-        rankStyle,
-      )}
-    >
-      <div className="flex items-center justify-between gap-1">
-        <span className="flex items-center gap-1 font-mono text-xs font-bold text-foreground">
-          <span className="text-rank1">#{rank}</span> {c.symbol}
-        </span>
-        <span
-          className={cn(
-            "inline-flex items-center gap-0.5 text-[10px] font-medium",
-            dirColor,
-          )}
-        >
-          <Dir className="size-3" />
-          {c.direction === "up"
-            ? es
-              ? "alcista"
-              : "up"
-            : es
-              ? "bajista"
-              : "down"}
-        </span>
+    <div className="flex flex-col gap-2 rounded-lg border border-border/80 bg-card/80 p-2.5">
+      <div className="flex items-start justify-between gap-1">
+        <div>
+          <div className="flex items-center gap-1.5">
+            <span className="flex size-5 items-center justify-center rounded bg-rank1/20 text-[10px] font-bold text-rank1">
+              {rank}
+            </span>
+            <span className="text-sm font-semibold">{c.symbol}</span>
+            {up ? (
+              <TrendingUp className="size-3.5 text-bull" />
+            ) : (
+              <TrendingDown className="size-3.5 text-bear" />
+            )}
+          </div>
+          <p className="mt-0.5 font-mono text-base font-bold tabular text-foreground">
+            {formatPrice(c.targetPrice, c.tick)}
+          </p>
+        </div>
+        <div className="text-right">
+          <p className="font-mono text-sm font-bold tabular text-teal">
+            {c.reachProb.toFixed(0)}%
+          </p>
+          <p className="text-[10px] text-muted-fg">
+            {c.pips.toFixed(1)} pips
+          </p>
+        </div>
       </div>
-
-      <p className="mt-1.5 flex items-center gap-1 font-mono text-lg font-semibold tabular text-foreground">
-        <Target className="size-3.5 text-teal" />
-        {formatPrice(c.targetPrice, c.tick)}
-      </p>
-      <p className="text-[10px] text-muted-fg">
-        {es ? "ahora" : "now"} {formatPrice(c.currentPrice, c.tick)} ·{" "}
-        <span className="text-teal">
-          {c.pips.toFixed(c.pips >= 20 ? 0 : 1)} pips
-        </span>
-      </p>
-
-      <div className="mt-2 flex flex-wrap gap-1">
-        <Badge className="border-0 bg-teal/15 font-mono text-[10px] text-teal">
-          P% {c.reachProb.toFixed(0)}
+      <div className="flex flex-wrap gap-1 text-[10px] text-muted-fg">
+        <Badge variant="outline" className="text-[10px]">
+          {c.interval}/{c.window}
         </Badge>
-        <Badge className="border-0 bg-muted font-mono text-[10px] text-muted-fg">
-          hist {c.histTouch.toFixed(0)}%
+        <Badge variant="outline" className="text-[10px]">
+          {c.style}
         </Badge>
-        {c.isMagnet && (
-          <Badge className="border-0 bg-rank1/20 text-[10px] text-rank1">
-            magnet
-          </Badge>
-        )}
-        {(c.consensus ?? 1) >= 2 && (
-          <Badge className="border-0 bg-teal/20 text-[10px] text-teal">
-            ×{c.consensus} win
-          </Badge>
-        )}
       </div>
-
-      <p className="mt-1.5 font-mono text-[10px] text-muted-fg">
-        {c.interval} · {c.range} · win {c.window} · {c.style}
-      </p>
-      <p className="text-[10px] text-muted-fg">
-        {c.name} · score {c.score.toFixed(0)}
-        {c.yahooSymbol ? ` · ${c.yahooSymbol}` : ""}
-      </p>
-
-      <div className="mt-2 flex gap-1">
+      <div className="mt-auto flex gap-1.5">
         <Button
           type="button"
           size="sm"
           variant="outline"
-          className="h-7 flex-1 text-[10px]"
-          onClick={onApply}
+          className="h-7 flex-1 gap-1 text-[11px]"
+          onClick={() =>
+            onApply({
+              symbol: c.symbol,
+              interval: c.interval,
+              range: c.range,
+              window: c.window,
+            })
+          }
         >
-          {es ? "Analizar" : "Analyze"}
+          <Target className="size-3" />
+          {es ? "Aplicar" : "Apply"}
         </Button>
-        {onArm && (
+        {onArmAlert && (
           <Button
             type="button"
             size="sm"
-            className="h-7 flex-1 bg-primary text-[10px] text-primary-foreground"
-            onClick={onArm}
+            className="h-7 flex-1 gap-1 bg-teal/90 text-[11px] text-black hover:bg-teal"
+            onClick={() => onArmAlert(c)}
           >
             {es ? "Alerta" : "Alert"}
           </Button>

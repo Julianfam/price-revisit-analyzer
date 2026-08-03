@@ -515,7 +515,7 @@ async function executeQuantumRun(
     universe,
     analyze,
     refineCount: QUANTUM_REFINE_ASSETS,
-    pauseMs: 70,
+    pauseMs: 0,
     minProb: data.minProb ?? 0,
     minPips: data.minPips ?? 0,
     onProgress: (e) => {
