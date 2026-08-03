@@ -9,6 +9,7 @@ import {
 import { toast } from "sonner";
 import { analyzeAsset } from "@/lib/analyzer/server";
 import {
+  clearAnalysisCache,
   readAnalysisCache,
   writeAnalysisCache,
 } from "@/lib/analyzer/result-cache";
@@ -242,14 +243,19 @@ export function AnalyzerApp() {
               tick: tickParsed,
               // Client already enforced Free quota (guest local / signed-in consume)
               consumeQuota: false,
+              // Always pull fresh market data — never reuse server/Yahoo cache
+              forceRefresh: true,
             },
           }),
           ANALYZE_TIMEOUT_MS,
           lang === "es" ? "Análisis" : "Analysis",
         );
         const ar = data as AnalysisResult;
-        setResult(ar);
+        // Ensure UI clock updates even if price value rounds the same
+        ar.fetchedAt = Date.now();
+        setResult({ ...ar });
         useAnalyzerHistory.getState().record(ar);
+        clearAnalysisCache();
         writeAnalysisCache(
           {
             symbol: sym,

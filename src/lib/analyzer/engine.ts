@@ -703,6 +703,8 @@ export function runAnalysis(opts: {
   maxScenarios?: number;
   /** Cap recent revisits (Free 5 / Pro 12). */
   maxRecentRevisits?: number;
+  /** Live / regular market price overlay (preferred for display). */
+  livePrice?: number | null;
 }): AnalysisResult {
   const sample = opts.bars.flatMap((b) => [b.o, b.h, b.l, b.c]);
   let tick =
@@ -744,8 +746,21 @@ export function runAnalysis(opts: {
     }
   }
 
-  const lastPrice =
-    opts.bars[opts.bars.length - 1]?.c ?? scenarios.currentPrice;
+  const barLast = opts.bars[opts.bars.length - 1]?.c ?? scenarios.currentPrice;
+  const live =
+    opts.livePrice != null &&
+    Number.isFinite(opts.livePrice) &&
+    opts.livePrice > 0
+      ? opts.livePrice
+      : null;
+  let lastPrice = barLast;
+  if (live != null) {
+    const rel = barLast > 0 ? Math.abs(live - barLast) / barLast : 0;
+    if (rel < 0.05 || allowsPriceDecimals(opts.yahooSymbol)) {
+      lastPrice = live;
+      scenarios.currentPrice = lastPrice;
+    }
+  }
 
   return {
     symbol: opts.symbol,
@@ -756,7 +771,9 @@ export function runAnalysis(opts: {
     windowMs: opts.windowMs,
     windowLabel: opts.windowLabel,
     bars: opts.bars,
-    lastPrice: allowsPriceDecimals(opts.yahooSymbol) ? lastPrice : Math.round(lastPrice),
+    lastPrice: allowsPriceDecimals(opts.yahooSymbol)
+      ? lastPrice
+      : Math.round(lastPrice),
     metrics,
     trend,
     scenarios,

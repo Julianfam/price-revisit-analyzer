@@ -1,7 +1,8 @@
 import type { AnalysisResult } from "./types";
 
 const KEY = "pra-analysis-cache-v1";
-const TTL_MS = 90_000;
+/** Very short — only speeds first paint; Analyze always refetches. */
+const TTL_MS = 20_000;
 
 type CacheEntry = {
   key: string;
@@ -63,5 +64,13 @@ export function writeAnalysisCache(
     sessionStorage.setItem(KEY, JSON.stringify(entry));
   } catch {
     /* quota */
+  }
+}
+
+export function clearAnalysisCache(): void {
+  try {
+    sessionStorage.removeItem(KEY);
+  } catch {
+    /* ignore */
   }
 }

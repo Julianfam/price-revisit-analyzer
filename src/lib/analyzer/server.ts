@@ -41,6 +41,8 @@ const analyzeInput = z.object({
   window: z.string().default("1h"),
   tick: z.number().positive().nullable().optional(),
   consumeQuota: z.boolean().optional().default(true),
+  /** Default true: always pull fresh market data on user Analyze. */
+  forceRefresh: z.boolean().optional().default(true),
 });
 
 async function planCapsForUser(
@@ -196,10 +198,11 @@ export const analyzeAsset = createServerFn({ method: "POST" })
     const windowOpt =
       WINDOW_OPTIONS.find((w) => w.value === data.window) ?? WINDOW_OPTIONS[1]!;
 
-    const { yahooSymbol, bars } = await fetchMarketOHLC({
+    const { yahooSymbol, bars, meta } = await fetchMarketOHLC({
       symbol: data.symbol,
       interval: data.interval,
       range: data.range,
+      forceRefresh: data.forceRefresh !== false,
     });
 
     const result = runAnalysis({
@@ -213,6 +216,7 @@ export const analyzeAsset = createServerFn({ method: "POST" })
       tickOverride: data.tick ?? null,
       maxScenarios: caps.maxScenarios,
       maxRecentRevisits: caps.maxRecentRevisits,
+      livePrice: meta.price,
     });
 
     const chartBars =
@@ -224,11 +228,17 @@ export const analyzeAsset = createServerFn({ method: "POST" })
       ...result,
       bars: chartBars,
       windows,
+      lastPrice:
+        meta.price && Number.isFinite(meta.price)
+          ? meta.price
+          : result.lastPrice,
       planMeta: {
         maxScenarios: caps.maxScenarios,
         isPremium: caps.isPremium,
-        dataSource: "market",
+        dataSource: meta.source ?? "market",
+        liveSource: meta.liveSource,
         alphaVantage: avStatus(),
+        fetchedAt: Date.now(),
       },
     };
   });
@@ -247,6 +257,7 @@ export const fetchLiveQuote = createServerFn({ method: "POST" })
       symbol: data.symbol,
       interval: "1m",
       range: "1d",
+      forceRefresh: true,
     });
     if (bars.length === 0) {
       throw new Error(`No live bars for ${yahooSymbol}`);

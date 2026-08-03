@@ -7,6 +7,9 @@ type YahooChartResponse = {
       meta?: {
         symbol?: string;
         regularMarketPrice?: number;
+        postMarketPrice?: number;
+        preMarketPrice?: number;
+        chartPreviousClose?: number;
         currency?: string;
         instrumentType?: string;
       };
@@ -33,7 +36,12 @@ function clampRange(interval: string, range: string): string {
     if (["6mo", "3mo"].includes(range)) return "1mo";
     return range;
   }
-  if (interval === "15m" || interval === "30m" || interval === "60m" || interval === "1h") {
+  if (
+    interval === "15m" ||
+    interval === "30m" ||
+    interval === "60m" ||
+    interval === "1h"
+  ) {
     if (["2y", "5y", "10y", "max"].includes(range)) return "3mo";
     if (range === "1y") return "6mo";
     return range;
@@ -41,8 +49,7 @@ function clampRange(interval: string, range: string): string {
   return range;
 }
 
-
-/** Short in-memory cache + in-flight coalesce (faster reloads / multi-poll). */
+/** Short in-memory cache + in-flight coalesce. */
 const yahooCache = new Map<
   string,
   { at: number; value: Awaited<ReturnType<typeof fetchYahooOHLCUncached>> }
@@ -51,13 +58,19 @@ const yahooInflight = new Map<
   string,
   Promise<Awaited<ReturnType<typeof fetchYahooOHLCUncached>>>
 >();
-const YAHOO_TTL_MS = 45_000;
+/** Short TTL so re-analyze within the same server instance still refreshes. */
+const YAHOO_TTL_MS = 12_000;
 
 async function fetchYahooOHLCUncached(opts: {
   symbol: string;
   interval: string;
   range: string;
-}): Promise<{ yahooSymbol: string; bars: OHLCBar[]; meta: { price?: number; currency?: string } }> {
+  forceRefresh?: boolean;
+}): Promise<{
+  yahooSymbol: string;
+  bars: OHLCBar[];
+  meta: { price?: number; currency?: string };
+}> {
   const yahooSymbol = resolveYahooSymbol(opts.symbol);
   const range = clampRange(opts.interval, opts.range);
   const interval = opts.interval === "1h" ? "60m" : opts.interval;
@@ -69,13 +82,20 @@ async function fetchYahooOHLCUncached(opts: {
   url.searchParams.set("range", range);
   url.searchParams.set("includePrePost", "false");
   url.searchParams.set("events", "div,splits");
+  if (opts.forceRefresh) {
+    url.searchParams.set("_", String(Date.now()));
+  }
 
   const res = await fetch(url.toString(), {
     headers: {
       "User-Agent":
         "Mozilla/5.0 (compatible; PriceRevisitAnalyzer/1.0; +https://x.ai)",
       Accept: "application/json",
+      ...(opts.forceRefresh
+        ? { "Cache-Control": "no-cache", Pragma: "no-cache" }
+        : {}),
     },
+    cache: opts.forceRefresh ? "no-store" : "default",
   });
 
   if (!res.ok) {
@@ -85,13 +105,17 @@ async function fetchYahooOHLCUncached(opts: {
   const data = (await res.json()) as YahooChartResponse;
   if (data.chart?.error) {
     throw new Error(
-      data.chart.error.description || data.chart.error.code || "Yahoo chart error",
+      data.chart.error.description ||
+        data.chart.error.code ||
+        "Yahoo chart error",
     );
   }
 
   const result = data.chart?.result?.[0];
   if (!result?.timestamp?.length) {
-    throw new Error(`No data returned for ${yahooSymbol}. Try another symbol or range.`);
+    throw new Error(
+      `No data returned for ${yahooSymbol}. Try another symbol or range.`,
+    );
   }
 
   const quote = result.indicators?.quote?.[0];
@@ -133,33 +157,62 @@ async function fetchYahooOHLCUncached(opts: {
     );
   }
 
+  const metaPrice =
+    result.meta?.regularMarketPrice ??
+    result.meta?.postMarketPrice ??
+    result.meta?.preMarketPrice;
+
   return {
     yahooSymbol,
     bars,
     meta: {
-      price: result.meta?.regularMarketPrice,
+      price:
+        typeof metaPrice === "number" && Number.isFinite(metaPrice)
+          ? metaPrice
+          : undefined,
       currency: result.meta?.currency,
     },
   };
 }
 
+export function invalidateYahooCache(symbol?: string): void {
+  if (!symbol) {
+    yahooCache.clear();
+    return;
+  }
+  const y = resolveYahooSymbol(symbol).toUpperCase();
+  for (const k of [...yahooCache.keys()]) {
+    if (k.toUpperCase().startsWith(`${y}|`)) yahooCache.delete(k);
+  }
+}
 
 export async function fetchYahooOHLC(opts: {
   symbol: string;
   interval: string;
   range: string;
-}): Promise<{ yahooSymbol: string; bars: OHLCBar[]; meta: { price?: number; currency?: string } }> {
+  /** Bypass memory cache + add cache-bust query (user Analyze). */
+  forceRefresh?: boolean;
+}): Promise<{
+  yahooSymbol: string;
+  bars: OHLCBar[];
+  meta: { price?: number; currency?: string };
+}> {
   const yahooSymbol = resolveYahooSymbol(opts.symbol);
   const range = clampRange(opts.interval, opts.range);
   const interval = opts.interval === "1h" ? "60m" : opts.interval;
   const key = `${yahooSymbol}|${interval}|${range}`;
   const now = Date.now();
-  const hit = yahooCache.get(key);
-  if (hit && now - hit.at < YAHOO_TTL_MS) {
-    return hit.value;
+
+  if (opts.forceRefresh) {
+    yahooCache.delete(key);
+  } else {
+    const hit = yahooCache.get(key);
+    if (hit && now - hit.at < YAHOO_TTL_MS) {
+      return hit.value;
+    }
+    const inflight = yahooInflight.get(key);
+    if (inflight) return inflight;
   }
-  const inflight = yahooInflight.get(key);
-  if (inflight) return inflight;
 
   const p = fetchYahooOHLCUncached(opts)
     .then((value) => {
