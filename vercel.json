@@ -3,5 +3,13 @@
   "framework": null,
   "buildCommand": "npm run build",
   "installCommand": "npm install",
-  "outputDirectory": ".vercel/output"
+  "outputDirectory": ".vercel/output",
+  "functions": {
+    "api/**/*": {
+      "maxDuration": 300
+    },
+    "**/*.func/**": {
+      "maxDuration": 300
+    }
+  }
 }

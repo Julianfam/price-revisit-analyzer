@@ -597,25 +597,35 @@ export const startQuantumAgent = createServerFn({ method: "POST" })
       throw new Error("PREMIUM_REQUIRED");
     }
 
+    /**
+     * Serverless (Vercel): in-memory job maps do not survive across isolates.
+     * Always run the full Quantum loop in THIS request and return the result.
+     * Progress is simulated on the client while the request is in flight.
+     */
     const jobId = newQuantumJobId();
     const universe = resolveUniverse(data);
     const totalEst =
       universe.length * QUANTUM_PHASE1_GRID.length +
       QUANTUM_REFINE_ASSETS * QUANTUM_PHASE2_GRID.length +
       1;
-    createQuantumJob(jobId, totalEst);
 
-    void executeQuantumRun(data, jobId).catch((e) => {
-      patchQuantumJob(jobId, {
-        status: "error",
-        error: e instanceof Error ? e.message : String(e),
-        pct: 100,
-        label: "Error",
-        detail: e instanceof Error ? e.message : String(e),
-      });
-    });
-
-    return { jobId, total: totalEst };
+    try {
+      const result = await executeQuantumRun(data, jobId);
+      return {
+        jobId,
+        total: totalEst,
+        status: "done" as const,
+        result,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return {
+        jobId,
+        total: totalEst,
+        status: "error" as const,
+        error: msg,
+      };
+    }
   });
 
 export const getQuantumStatus = createServerFn({ method: "POST" })
@@ -627,6 +637,7 @@ export const getQuantumStatus = createServerFn({ method: "POST" })
       data,
     }): Promise<QuantumJobProgress | { missing: true }> => {
       const job = getQuantumJob(data.jobId);
+      // Soft-miss: client should not hard-fail — prefer sync start path
       if (!job) return { missing: true };
       return job;
     },

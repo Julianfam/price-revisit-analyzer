@@ -12,6 +12,7 @@ import {
 import { toast } from "sonner";
 import {
   getQuantumStatus,
+  runQuantumAgent,
   startQuantumAgent,
 } from "@/lib/analyzer/server";
 import {
@@ -81,8 +82,49 @@ export function QuantumAgentPanel({
     }
     setLoading(true);
     setError(null);
-    setProgress({ pct: 2, label: es ? "En cola" : "Queued", detail: "…", phase: 0 });
+    setProgress({
+      pct: 4,
+      label: es ? "Fase 1 · escaneo amplio" : "Phase 1 · wide scan",
+      detail: es ? "Consultando mercado…" : "Fetching market…",
+      phase: 1,
+    });
     stopPoll();
+
+    // Client-side progress while the single serverless request runs
+    const phases: ProgressView[] = es
+      ? [
+          { pct: 12, label: "Fase 1 · escaneo amplio", detail: "Barrido multi-activo…", phase: 1 },
+          { pct: 28, label: "Fase 1 · escaneo amplio", detail: "Combos de ventana…", phase: 1 },
+          { pct: 45, label: "Fase 2 · refine", detail: "Top activos…", phase: 2 },
+          { pct: 62, label: "Fase 2 · refine", detail: "Más profundidad…", phase: 2 },
+          { pct: 78, label: "Consenso", detail: "Acuerdo multi-ventana…", phase: 3 },
+          { pct: 90, label: "Ranking", detail: "Top 12 (máx. 2/activo)…", phase: 3 },
+        ]
+      : [
+          { pct: 12, label: "Phase 1 · wide scan", detail: "Multi-asset sweep…", phase: 1 },
+          { pct: 28, label: "Phase 1 · wide scan", detail: "Window combos…", phase: 1 },
+          { pct: 45, label: "Phase 2 · refine", detail: "Top assets…", phase: 2 },
+          { pct: 62, label: "Phase 2 · refine", detail: "Deeper passes…", phase: 2 },
+          { pct: 78, label: "Consensus", detail: "Multi-window agree…", phase: 3 },
+          { pct: 90, label: "Ranking", detail: "Top 12 (max 2/asset)…", phase: 3 },
+        ];
+    let step = 0;
+    pollRef.current = window.setInterval(() => {
+      if (step < phases.length) {
+        setProgress(phases[step]!);
+        step += 1;
+      } else {
+        setProgress((p) =>
+          p
+            ? {
+                ...p,
+                pct: Math.min(96, p.pct + 1),
+                detail: es ? "Casi listo…" : "Almost done…",
+              }
+            : p,
+        );
+      }
+    }, 1800);
 
     try {
       const start = (await startQuantumAgent({
@@ -91,10 +133,46 @@ export function QuantumAgentPanel({
           minProb,
           minPips,
         },
-      })) as { jobId: string; total: number };
+      })) as {
+        jobId: string;
+        total: number;
+        status?: "done" | "error";
+        result?: QuantumRunResult;
+        error?: string;
+      };
 
+      stopPoll();
+
+      if (start.status === "error" || start.error) {
+        throw new Error(start.error || "Quantum failed");
+      }
+
+      // Preferred path: full result in the same response (Vercel-safe)
+      if (start.result) {
+        setProgress({
+          pct: 100,
+          label: es ? "Listo" : "Done",
+          detail: `${start.result.topPrices.length} targets`,
+          phase: 3,
+        });
+        setResult(start.result);
+        const n = start.result.topPrices.length;
+        if (n === 0) {
+          toast.message(
+            es
+              ? "Sin targets con esos filtros — baja P% o pips"
+              : "No targets with those filters — lower P% or pips",
+          );
+        } else {
+          toast.success(
+            es ? `Quantum · ${n} resultados` : `Quantum · ${n} results`,
+          );
+        }
+        return;
+      }
+
+      // Legacy poll path (long-lived Node with in-memory jobs)
       const jobId = start.jobId;
-
       await new Promise<void>((resolve, reject) => {
         let tries = 0;
         pollRef.current = window.setInterval(() => {
@@ -117,9 +195,30 @@ export function QuantumAgentPanel({
                 | { missing: true };
 
               if ("missing" in st && st.missing) {
-                if (tries > 8) {
+                // Serverless lost the job — fall back to full sync run once
+                if (tries === 1 || tries === 3) {
+                  return;
+                }
+                if (tries >= 4) {
                   stopPoll();
-                  reject(new Error(es ? "Job no encontrado" : "Job not found"));
+                  try {
+                    const full = (await runQuantumAgent({
+                      data: { assetCount: 7, minProb, minPips },
+                    })) as QuantumRunResult;
+                    setResult(full);
+                    toast.success(
+                      es
+                        ? `Quantum · ${full.topPrices.length} resultados`
+                        : `Quantum · ${full.topPrices.length} results`,
+                    );
+                    resolve();
+                  } catch (err) {
+                    reject(
+                      err instanceof Error
+                        ? err
+                        : new Error(es ? "Job no encontrado" : "Job not found"),
+                    );
+                  }
                 }
                 return;
               }
@@ -163,7 +262,6 @@ export function QuantumAgentPanel({
                 stopPoll();
                 reject(new Error(job.error || "Quantum failed"));
               } else if (tries > 400) {
-                // ~3–4 min safety
                 stopPoll();
                 reject(new Error(es ? "Timeout Quantum" : "Quantum timeout"));
               }
@@ -187,11 +285,15 @@ export function QuantumAgentPanel({
         onNeedUpgrade?.();
       } else {
         setError(msg);
+        toast.error(es ? "Quantum falló" : "Quantum failed", {
+          description: msg.slice(0, 160),
+        });
       }
     } finally {
       stopPoll();
       setLoading(false);
-      setProgress(null);
+      // keep last progress briefly then clear via next paint
+      window.setTimeout(() => setProgress(null), 600);
     }
   }, [enabled, es, minProb, minPips, onNeedUpgrade, stopPoll]);
 
