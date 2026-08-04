@@ -304,13 +304,13 @@ export function QuantumAgentPanel({
       <div className="space-y-3 p-3 sm:p-4">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0">
-            <p className="flex flex-wrap items-center gap-1.5 text-sm font-semibold text-foreground">
+            <div className="flex flex-wrap items-center gap-1.5 text-sm font-semibold text-foreground">
               <Atom className="size-4 text-rank1" />
-              Quantum Agent
+              <span>Quantum Agent</span>
               <Badge className="border-0 bg-rank1/20 text-[10px] text-rank1">
                 PRO
               </Badge>
-            </p>
+            </div>
             <p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted-fg">
               {es
                 ? "Bucle multi-fase en una sola petición (compatible cloud). Filtra por P% y pips. Especulativo."
